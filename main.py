@@ -39,14 +39,14 @@ def get_raznaryadka_by_date(target_date: str):
 
   # 3. Считаем потребность по каждой точке
   points_report = []
-  summary_ingredients = {}  г  # Общий итог закупок по всем точкам
+  summary_ingredients = {}  # Общий итог закупок по всем точкам
 
   for point_id, point_info in POINTS.items():
     children = point_info["children_count"]
     point_needs = {}
 
     for prod_code, norm_per_child in ttk_items.items():
-      total_needed = norm_per_child * children  г  # расход на точку
+      total_needed = norm_per_child * children  # расход на точку
       point_needs[prod_code] = {
           "product_name": PRODUCTS[prod_code]["name"],
           "unit": PRODUCTS[prod_code]["unit"],
@@ -79,6 +79,6 @@ def get_raznaryadka_by_date(target_date: str):
       "date": parsed_date.isoformat(),
       "is_working_day": True,
       "menu_number": menu_num,
-      "points_breakdown": points_report,  г  # Детализация по каждой из 24 точек
-      "total_purchase_list": summary_ingredients,  г  # Сводный список для закупа
+      "points_breakdown": points_report,  # Детализация по каждой точке
+      "total_purchase_list": summary_ingredients,  # Сводный список для закупа
   }
