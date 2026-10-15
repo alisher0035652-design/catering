@@ -11,17 +11,13 @@ SETTINGS_FILE = "calendar_settings.json"
 
 
 def load_manual_settings() -> dict:
-  """Загружает ручные настройки календаря (какой день — выходной, или какое меню
-
-  принудительно).
-  """
   if os.path.exists(SETTINGS_FILE):
     try:
       with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
     except Exception:
       return {}
-  return {"days": {}}  # Формат: {"2026-11-01": {"is_holiday": True, "menu": null}}
+  return {"days": {}}
 
 
 def save_manual_settings(settings: dict):
@@ -29,45 +25,73 @@ def save_manual_settings(settings: dict):
     json.dump(settings, f, ensure_ascii=False, indent=4)
 
 
-def get_menu_number_for_date_custom(target_date: date) -> int | None:
-  """Определяет номер меню на дату с учетом ручных настроек и стандартных выходных."""
-  date_str = target_date.isoformat()
+def calculate_calendar_dynamic(start_date: date, end_date: date) -> dict:
+  """Динамически рассчитывает календарь от start_date до end_date с учетом ручных
+
+  правок. Если день рабочий, по порядку назначает меню (1-10) с учетом сдвигов.
+  """
   settings = load_manual_settings()
+  manual_days = settings.get("days", {})
 
-  # 1. Проверяем ручные настройки для конкретной даты
-  if date_str in settings.get("days", {}):
-    day_conf = settings["days"][date_str]
-    if day_conf.get("is_holiday", False):
-      return None  # Вручную отмечено как выходной / нерабочий день
-    if "menu" in day_conf and day_conf["menu"] is not None:
-      return int(day_conf["menu"])  # Принудительно заданный номер меню (от 1 до 10)
+  current_menu = 1
+  anchor_menu_set = False
 
-  # 2. Если ручных настроек нет, смотрим стандартные правила: Сб и Вс — выходные
-  if target_date.weekday() >= 5:
-    return None
+  calendar_map = {}
+  current = start_date
 
-  # 3. Автоматический расчет по циклу (если нет ручных переопределений)
-  anchor_date = date(2026, 1, 5)
-  anchor_menu = 1
+  while current <= end_date:
+    d_str = current.isoformat()
+    day_conf = manual_days.get(d_str, {})
 
-  if target_date < anchor_date:
-    return 1
+    is_holiday = day_conf.get("is_holiday", False)
+    # По умолчанию суббота и воскресенье — выходные (красные)
+    if current.weekday() >= 5 and "is_holiday" not in day_conf:
+      is_holiday = True
 
-  current = anchor_date
-  work_days_passed = 0
-  while current < target_date:
+    # Проверяем, задано ли меню вручную для этого дня
+    forced_menu = day_conf.get("menu", None)
+
+    if is_holiday:
+      calendar_map[d_str] = {
+          "date": d_str,
+          "is_holiday": True,
+          "menu": None,
+          "forced": False,
+      }
+    else:
+      if forced_menu is not None:
+        current_menu = int(forced_menu)
+        calendar_map[d_str] = {
+            "date": d_str,
+            "is_holiday": False,
+            "menu": current_menu,
+            "forced": True,
+        }
+      else:
+        calendar_map[d_str] = {
+            "date": d_str,
+            "is_holiday": False,
+            "menu": current_menu,
+            "forced": False,
+        }
+      # Переходим к следующему меню (от 1 до 10)
+      current_menu = (current_menu % 10) + 1
+
     current += timedelta(days=1)
-    # Проверяем, не был ли промежуточный день отмечен как выходной вручную или Сб/Вс
-    curr_str = current.isoformat()
-    is_hol = False
-    if curr_str in settings.get("days", {}):
-      is_hol = settings["days"][curr_str].get("is_holiday", False)
 
-    if not is_hol and current.weekday() < 5:
-      work_days_passed += 1
+  return calendar_map
 
-  menu_number = ((anchor_menu - 1 + work_days_passed) % 10) + 1
-  return menu_number
+
+def get_menu_number_for_date_custom(target_date: date) -> int | None:
+  start = date(2026, 1, 1)
+  cal = calculate_calendar_dynamic(start, target_date + timedelta(days=30))
+  d_str = target_date.isoformat()
+  if d_str in cal:
+    day_info = cal[d_str]
+    if day_info["is_holiday"]:
+      return None
+    return day_info["menu"]
+  return None
 
 
 def load_points_from_excel(region: str = "Город") -> dict:
@@ -118,7 +142,6 @@ def load_menu_from_excel(menu_num: int) -> dict:
 
 @app.get("/", response_class=HTMLResponse)
 def get_dashboard():
-  """Главная страница с переключением между Матрицей и Настройками Календаря."""
   html_content = """
     <!DOCTYPE html>
     <html lang="ru">
@@ -130,7 +153,6 @@ def get_dashboard():
     </head>
     <body class="bg-gray-50 text-gray-800 font-sans">
         <div class="max-w-[95%] mx-auto px-4 py-8">
-            <!-- Навигация -->
             <nav class="bg-white shadow rounded-lg p-4 mb-6 flex justify-between items-center">
                 <div class="flex items-center space-x-3">
                     <span class="text-xl font-bold text-blue-600">🍽 Кетеринг ERP</span>
@@ -138,7 +160,7 @@ def get_dashboard():
                 </div>
                 <div class="flex space-x-2">
                     <button onclick="switchTab('matrix')" id="btnTabMatrix" class="px-4 py-2 rounded-md text-sm font-medium bg-blue-600 text-white transition">📊 Матрица разнарядки</button>
-                    <button onclick="switchTab('calendar')" id="btnTabCalendar" class="px-4 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">⚙️ Настройка календаря меню</button>
+                    <button onclick="switchTab('calendar')" id="btnTabCalendar" class="px-4 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">📅 Интерактивный календарь меню</button>
                 </div>
             </nav>
 
@@ -147,7 +169,7 @@ def get_dashboard():
                 <header class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center">
                     <div>
                         <h1 class="text-xl font-bold text-gray-800">Матричная разнарядка (Продукты × МТТ)</h1>
-                        <p class="text-sm text-gray-500 mt-1">Учитывает ручные переопределения дней и праздников</p>
+                        <p class="text-sm text-gray-500 mt-1">Автоматический расчет по календарю с учетом дней отдыха</p>
                     </div>
                     <div class="mt-4 md:mt-0 flex flex-wrap items-center gap-3">
                         <div>
@@ -172,62 +194,71 @@ def get_dashboard():
                 </div>
             </div>
 
-            <!-- Вкладка 2: Настройка календаря -->
+            <!-- Вкладка 2: Интерактивный Календарь -->
             <div id="tabCalendar" class="hidden space-y-6">
-                <header class="bg-white shadow rounded-lg p-6">
-                    <h1 class="text-xl font-bold text-gray-800">Ручная настройка календаря и меню</h1>
-                    <p class="text-sm text-gray-500 mt-1">Здесь вы можете указать для конкретного дня статус выходного (отдыха) или принудительно назначить номер меню (от 1 до 10).</p>
+                <header class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center">
+                    <div>
+                        <h1 class="text-xl font-bold text-gray-800">Интерактивный календарь меню</h1>
+                        <p class="text-sm text-gray-500 mt-1">Кликните на любой день, чтобы сделать его выходным (красным) или изменить номер меню — вся цепочка пересчитается автоматически!</p>
+                    </div>
+                    <div class="flex items-center space-x-3 mt-4 md:mt-0">
+                        <button onclick="changeMonth(-1)" class="bg-gray-200 px-3 py-1.5 rounded text-sm font-bold hover:bg-gray-300">◄ Месяц</button>
+                        <span id="currentMonthLabel" class="font-bold text-lg text-blue-600"></span>
+                        <button onclick="changeMonth(1)" class="bg-gray-200 px-3 py-1.5 rounded text-sm font-bold hover:bg-gray-300">Месяц ►</button>
+                    </div>
                 </header>
 
-                <div class="bg-white shadow rounded-lg p-6 space-y-6">
-                    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
-                        <div>
-                            <label class="block text-xs font-medium text-gray-700 mb-1">Дата:</label>
-                            <input type="date" id="calDate" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
-                        </div>
-                        <div>
-                            <label class="block text-xs font-medium text-gray-700 mb-1">Тип дня:</label>
-                            <select id="calIsHoliday" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
-                                <option value="false">Рабочий день</option>
-                                <option value="true">Выходной / Праздник (Отдых)</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label class="block text-xs font-medium text-gray-700 mb-1">Принудительное меню (1-10):</label>
-                            <select id="calMenuNum" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
-                                <option value="">Автоматически (по циклу)</option>
-                                <option value="1">Меню № 1</option>
-                                <option value="2">Меню № 2</option>
-                                <option value="3">Меню № 3</option>
-                                <option value="4">Меню № 4</option>
-                                <option value="5">Меню № 5</option>
-                                <option value="6">Меню № 6</option>
-                                <option value="7">Меню № 7</option>
-                                <option value="8">Меню № 8</option>
-                                <option value="9">Меню № 9</option>
-                                <option value="10">Меню № 10</option>
-                            </select>
-                        </div>
-                        <div>
-                            <button onclick="saveCalendarSetting()" class="w-full bg-green-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-green-700 transition">Сохранить настройку</button>
-                        </div>
+                <!-- Сетка календаря (квадратики) -->
+                <div class="bg-white shadow rounded-lg p-6">
+                    <div class="grid grid-cols-7 gap-2 mb-3 text-center font-bold text-sm text-gray-600">
+                        <div>Пн</div><div>Вт</div><div>Ср</div><div>Чт</div><div>Пт</div><div class="text-red-500">Сб</div><div class="text-red-500">Вс</div>
                     </div>
-
-                    <hr class="my-4">
-
-                    <div>
-                        <h3 class="text-md font-bold text-gray-800 mb-3">Сохраненные ручные настройки дней:</h3>
-                        <div id="settingsListContainer" class="overflow-x-auto">
-                            <p class="text-sm text-gray-500">Загрузка...</p>
-                        </div>
+                    <div id="calendarGrid" class="grid grid-cols-7 gap-3">
+                        <!-- Квадратики дней будут здесь -->
                     </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Модальное окно редактирования дня -->
+        <div id="dayModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div class="bg-white rounded-lg p-6 w-96 shadow-xl space-y-4">
+                <h3 id="modalDateTitle" class="font-bold text-lg text-gray-800">Настройка дня</h3>
+                <div>
+                    <label class="block text-xs font-medium text-gray-700 mb-1">Статус дня:</label>
+                    <select id="modalIsHoliday" class="w-full border rounded px-3 py-2 text-sm">
+                        <option value="false">Рабочий день</option>
+                        <option value="true">День отдыха / Выходной (Красный)</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-700 mb-1">Принудительное меню (оставьте пустым для авто-расчета):</label>
+                    <select id="modalMenu" class="w-full border rounded px-3 py-2 text-sm">
+                        <option value="">Автоматически по цепочке</option>
+                        <option value="1">Меню № 1</option>
+                        <option value="2">Меню № 2</option>
+                        <option value="3">Меню № 3</option>
+                        <option value="4">Меню № 4</option>
+                        <option value="5">Меню № 5</option>
+                        <option value="6">Меню № 6</option>
+                        <option value="7">Меню № 7</option>
+                        <option value="8">Меню № 8</option>
+                        <option value="9">Меню № 9</option>
+                        <option value="10">Меню № 10</option>
+                    </select>
+                </div>
+                <div class="flex justify-end space-x-2 pt-2">
+                    <button onclick="closeModal()" class="bg-gray-200 px-4 py-2 rounded text-sm font-medium">Отмена</button>
+                    <button onclick="saveDaySettings()" class="bg-blue-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-blue-700">Сохранить и пересчитать</button>
                 </div>
             </div>
         </div>
 
         <script>
             document.getElementById('targetDate').valueAsDate = new Date();
-            document.getElementById('calDate').valueAsDate = new Date();
+            let viewYear = new Date().getFullYear();
+            let viewMonth = new Date().getMonth(); // 0-11
+            let selectedDateStr = '';
 
             function switchTab(tab) {
                 if (tab === 'matrix') {
@@ -240,8 +271,103 @@ def get_dashboard():
                     document.getElementById('tabCalendar').classList.remove('hidden');
                     document.getElementById('btnTabCalendar').className = "px-4 py-2 rounded-md text-sm font-medium bg-blue-600 text-white transition";
                     document.getElementById('btnTabMatrix').className = "px-4 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition";
-                    loadCalendarSettingsList();
+                    loadCalendarGrid();
                 }
+            }
+
+            function changeMonth(dir) {
+                viewMonth += dir;
+                if (viewMonth > 11) { viewMonth = 0; viewYear++; }
+                if (viewMonth < 0) { viewMonth = 11; viewYear--; }
+                loadCalendarGrid();
+            }
+
+            async function loadCalendarGrid() {
+                const monthNames = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
+                document.getElementById('currentMonthLabel').innerText = `${monthNames[viewMonth]} ${viewYear}`;
+
+                // Получаем первый и последний день отображаемого месяца
+                const firstDay = new Date(viewYear, viewMonth, 1);
+                const lastDay = new Date(viewYear, viewMonth + 1, 0);
+
+                const startStr = firstDay.toISOString().split('T')[0];
+                const endStr = lastDay.toISOString().split('T')[0];
+
+                const response = await fetch(`/api/calendar/range?start=${startStr}&end=${endStr}`);
+                const data = await response.json(); // { "2026-10-01": {is_holiday, menu, forced}, ... }
+
+                const grid = document.getElementById('calendarGrid');
+                grid.innerHTML = '';
+
+                // Сдвиг для недели (Пн = 0)
+                let startWeekDay = firstDay.getDay() - 1;
+                if (startWeekDay === -1) startWeekDay = 6;
+
+                // Пустые ячейки до начала месяца
+                for (let i = 0; i < startWeekDay; i++) {
+                    grid.innerHTML += `<div class="bg-gray-50 rounded-lg min-h-[100px] opacity-40"></div>`;
+                }
+
+                // Дни месяца
+                for (let d = 1; d <= lastDay.getDate(); d++) {
+                    const dObj = new Date(viewYear, viewMonth, d);
+                    const dStr = dObj.toISOString().split('T')[0];
+                    const info = data[dStr] || { is_holiday: false, menu: 1, forced: false };
+
+                    let bgClass = "bg-white border-gray-200 hover:border-blue-400";
+                    let badgeBg = "bg-blue-100 text-blue-800";
+                    let statusText = `Меню № ${info.menu}`;
+
+                    if (info.is_holiday) {
+                        bgClass = "bg-red-50 border-red-300 hover:border-red-500";
+                        badgeBg = "bg-red-200 text-red-900";
+                        statusText = "День отдыха";
+                    } else if (info.forced) {
+                        badgeBg = "bg-purple-100 text-purple-800";
+                        statusText += " (Руч.)";
+                    }
+
+                    grid.innerHTML += `
+                        <div onclick="openDayModal('${dStr}', ${info.is_holiday}, ${info.menu})" class="border ${bgClass} rounded-lg p-3 min-h-[105px] flex flex-col justify-between cursor-pointer shadow-sm transition">
+                            <div class="flex justify-between items-center">
+                                <span class="font-bold text-sm text-gray-700">${d}</span>
+                                ${info.forced ? '<span class="text-[10px] bg-purple-200 text-purple-800 px-1 rounded">Fix</span>' : ''}
+                            </div>
+                            <div class="text-center my-auto">
+                                <span class="inline-block px-2.5 py-1 rounded-md text-xs font-bold ${badgeBg}">
+                                    ${statusText}
+                                </span>
+                            </div>
+                        </div>
+                    `;
+                }
+            }
+
+            function openDayModal(dateStr, isHoliday, menuNum) {
+                selectedDateStr = dateStr;
+                document.getElementById('modalDateTitle.innerText') = `Настройка дня: ${dateStr}`;
+                document.getElementById('modalIsHoliday').value = isHoliday ? "true" : "false";
+                document.getElementById('modalMenu').value = menuNum !== null ? menuNum : "";
+                document.getElementById('dayModal').classList.remove('hidden');
+            }
+
+            function closeModal() {
+                document.getElementById('dayModal').classList.add('hidden');
+            }
+
+            async function saveDaySettings() {
+                const is_holiday = document.getElementById('modalIsHoliday').value === 'true';
+                const menuVal = document.getElementById('modalMenu').value;
+                const menu = menuVal ? parseInt(menuVal) : null;
+
+                await fetch('/api/calendar/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ date: selectedDateStr, is_holiday, menu })
+                });
+
+                closeModal();
+                loadCalendarGrid();
             }
 
             async function loadMatrixRaznaryadka() {
@@ -273,7 +399,7 @@ def get_dashboard():
                         </div>
 
                         <div class="bg-white shadow rounded-lg overflow-hidden">
-                            <div class="bg-gray-50 px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+                            <div class="bg-gray-50 px-6 py-4 border-b border-gray-200">
                                 <h3 class="text-lg font-medium text-gray-900">📊 Сводная матрица закупки на неделю</h3>
                             </div>
                             <div class="overflow-x-auto" style="max-height: 700px;">
@@ -318,57 +444,6 @@ def get_dashboard():
                 }
             }
 
-            async function saveCalendarSetting() {
-                const date = document.getElementById('calDate').value;
-                const is_holiday = document.getElementById('calIsHoliday').value === 'true';
-                const menuVal = document.getElementById('calMenuNum').value;
-                const menu = menuVal ? parseInt(menuVal) : null;
-
-                if (!date) { alert('Выберите дату'); return; }
-
-                const response = await fetch('/api/calendar/settings', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ date, is_holiday, menu })
-                });
-
-                if (response.ok) {
-                    alert('Настройка успешно сохранена!');
-                    loadCalendarSettingsList();
-                } else {
-                    alert('Ошибка сохранения');
-                }
-            }
-
-            async function loadCalendarSettingsList() {
-                const container = document.getElementById('settingsListContainer');
-                const response = await fetch('/api/calendar/settings');
-                const data = await response.json();
-                
-                const days = data.days || {};
-                if (Object.keys(days).length === 0) {
-                    container.innerHTML = '<p class="text-sm text-gray-500">Ручных настроек пока нет. Все дни рассчитываются автоматически.</p>';
-                    return;
-                }
-
-                let html = '<table class="min-w-full divide-y divide-gray-200 text-sm"><thead><tr><th class="px-4 py-2 text-left">Дата</th><th class="px-4 py-2 text-left">Статус</th><th class="px-4 py-2 text-left">Меню</th><th class="px-4 py-2 text-right">Действие</th></tr></thead><tbody class="divide-y divide-gray-200">';
-                for (const [d, conf] of Object.entries(days)) {
-                    html += `<tr>
-                        <td class="px-4 py-2 font-medium">${d}</td>
-                        <td class="px-4 py-2">${conf.is_holiday ? '<span class="text-red-600 font-bold">Выходной / Отдых</span>' : '<span class="text-green-600 font-bold">Рабочий день</span>'}</td>
-                        <td class="px-4 py-2">${conf.menu !== null ? 'Меню № ' + conf.menu : 'Авто по циклу'}</td>
-                        <td class="px-4 py-2 text-right"><button onclick="deleteSetting('${d}')" class="text-red-600 hover:text-red-800 text-xs font-semibold">Удалить</button></td>
-                    </tr>`;
-                }
-                html += '</tbody></table>';
-                container.innerHTML = html;
-            }
-
-            async function deleteSetting(dateStr) {
-                await fetch(`/api/calendar/settings/${dateStr}`, { method: 'DELETE' });
-                loadCalendarSettingsList();
-            }
-
             window.onload = loadMatrixRaznaryadka;
         </script>
     </body>
@@ -377,17 +452,21 @@ def get_dashboard():
   return HTMLResponse(content=html_content)
 
 
-@app.get("/api/calendar/settings")
-def get_settings_api():
-  return load_manual_settings()
+@app.get("/api/calendar/range")
+def get_calendar_range_api(start: str, end: str):
+  """Возвращает рассчитанный динамический календарь для выбранного диапазона дат."""
+  try:
+    s_date = date.fromisoformat(start)
+    e_date = date.fromisoformat(end)
+  except ValueError:
+    raise HTTPException(status_code=400, detail="Неверный формат дат")
+
+  cal_map = calculate_calendar_dynamic(s_date, e_date)
+  return cal_map
 
 
 @app.post("/api/calendar/settings")
 def save_setting_api(data: dict):
-  """Сохраняет настройку дня: {"date": "2026-11-01", "is_holiday": false, "menu":
-
-  3}
-  """
   date_str = data.get("date")
   if not date_str:
     raise HTTPException(status_code=400, detail="Дата обязательна")
@@ -398,15 +477,6 @@ def save_setting_api(data: dict):
       "menu": data.get("menu"),
   }
   save_manual_settings(settings)
-  return {"status": "success"}
-
-
-@app.delete("/api/calendar/settings/{date_str}")
-def delete_setting_api(date_str: str):
-  settings = load_manual_settings()
-  if date_str in settings["days"]:
-    del settings["days"][date_str]
-    save_manual_settings(settings)
   return {"status": "success"}
 
 
@@ -436,7 +506,7 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
   for day in week_days:
     menu_num = get_menu_number_for_date_custom(day)
     if menu_num is None:
-      continue  # Пропускаем выходные и дни отдыха
+      continue  # День отдыха или выходной
 
     working_days_count += 1
     ttk_items = load_menu_from_excel(menu_num)
