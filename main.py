@@ -6,41 +6,30 @@ from calendar_logic import get_menu_number_for_date
 
 app = FastAPI(title="Catering Management API", version="1.0.0")
 
-# Справочник 24 точек (можно позже тоже вынести в базу или Excel, пока зафиксируем здесь)
-POINTS = {
-    1: {"name": "Школа №1", "children_count": 300},
-    2: {"name": "Детсад №12", "children_count": 150},
-    3: {"name": "Школа №3", "children_count": 400},
-    4: {"name": "Детсад №4", "children_count": 220},
-    5: {"name": "Школа №5", "children_count": 350},
-    6: {"name": "Детсад №6", "children_count": 180},
-    7: {"name": "Школа №7", "children_count": 500},
-    8: {"name": "Детсад №8", "children_count": 210},
-    9: {"name": "Школа №9", "children_count": 320},
-    10: {"name": "Детсад №10", "children_count": 160},
-    11: {"name": "Школа №11", "children_count": 290},
-    12: {"name": "Детсад №12-б", "children_count": 190},
-    13: {"name": "Школа №13", "children_count": 370},
-    14: {"name": "Детсад №14", "children_count": 200},
-    15: {"name": "Школа №15", "children_count": 410},
-    16: {"name": "Детсад №16", "children_count": 175},
-    17: {"name": "Школа №17", "children_count": 340},
-    18: {"name": "Детсад №18", "children_count": 230},
-    19: {"name": "Школа №19", "children_count": 380},
-    20: {"name": "Детсад №20", "children_count": 195},
-    21: {"name": "Школа №21", "children_count": 450},
-    22: {"name": "Детсад №22", "children_count": 215},
-    23: {"name": "Школа №23", "children_count": 310},
-    24: {"name": "Детсад №24", "children_count": 240},
-}
+
+def load_points_from_excel(region: str = "Город") -> dict:
+  """Загружает список точек (МТТ) из файла Location.xlsx.
+
+  region: 'Город' (активные сейчас, 21 точка) или 'Район' (планируемые, ~34
+  точки). Для примера зададим среднее количество детей (например, 200 на точку,
+  позже заменим на реальные данные).
+  """
+  try:
+    df = pd.read_excel("Location.xlsx", sheet_name=region, header=None)
+    points = {}
+    for idx, row in df.iterrows():
+      mtt_name = str(row.iloc[0]).strip()
+      if mtt_name and mtt_name != "nan":
+        # Условное количество детей по умолчанию (можно будет вынести во второй столбец Location.xlsx)
+        points[idx + 1] = {"name": mtt_name, "children_count": 200}
+    return points
+  except Exception as e:
+    print(f"Ошибка чтения точек из Location.xlsx ({region}): {e}")
+    return {}
 
 
 def load_menu_from_excel(menu_num: int) -> dict:
-  """Загружает техкарту из соответствующего листа Excel-файла Menu.xlsx.
-
-  Листы названы: '1-Меню', '2-Меню' и т.д. В файле нормы даны в граммах на 1
-  ребенка. Переводим в килограммы/литры (делим на 1000).
-  """
+  """Загружает техкарту из листа Menu.xlsx (перевод граммов в кг/л)."""
   sheet_name = f"{menu_num}-Меню"
   try:
     df = pd.read_excel("Menu.xlsx", sheet_name=sheet_name)
@@ -48,7 +37,6 @@ def load_menu_from_excel(menu_num: int) -> dict:
     for _, row in df.iterrows():
       prod_name = str(row.iloc[0]).strip()
       grams_per_child = float(row.iloc[1]) if pd.notna(row.iloc[1]) else 0.0
-      # Переводим граммы в кг/л для расхода
       menu_items[prod_name] = grams_per_child / 1000.0
     return menu_items
   except Exception as e:
@@ -58,14 +46,14 @@ def load_menu_from_excel(menu_num: int) -> dict:
 
 @app.get("/", response_class=HTMLResponse)
 def get_dashboard():
-  """Интерфейс логиста с поддержкой загрузки данных из Excel."""
+  """Дашборд логиста с выбором региона (Город / Район) и даты."""
   html_content = """
     <!DOCTYPE html>
     <html lang="ru">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Разнарядка Кетеринг (Excel Menu)</title>
+        <title>Разнарядка Кетеринг</title>
         <script src="https://cdn.tailwindcss.com"></script>
     </head>
     <body class="bg-gray-50 text-gray-800 font-sans">
@@ -73,18 +61,29 @@ def get_dashboard():
             <header class="bg-white shadow rounded-lg p-6 mb-8 flex flex-col md:flex-row justify-between items-center">
                 <div>
                     <h1 class="text-2xl font-bold text-blue-600">🍽 Управление Разнарядкой Кетеринга</h1>
-                    <p class="text-sm text-gray-500 mt-1">Данные меню загружаются автоматически из файла Menu.xlsx (10 листов)</p>
+                    <p class="text-sm text-gray-500 mt-1">Меню (Menu.xlsx) + Точки МТТ (Location.xlsx)</p>
                 </div>
-                <div class="mt-4 md:mt-0 flex items-center space-x-3">
-                    <label class="text-sm font-medium text-gray-700">Дата доставки:</label>
-                    <input type="date" id="targetDate" class="border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                    <button onclick="loadRaznaryadka()" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 transition">Сформировать</button>
+                <div class="mt-4 md:mt-0 flex flex-wrap items-center gap-3">
+                    <div>
+                        <label class="text-xs font-medium text-gray-600 block">Регион:</label>
+                        <select id="regionSelect" class="border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500">
+                            <option value="Город" selected>Город (Текущие)</option>
+                            <option value="Район">Район (Тендер / Будущие)</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="text-xs font-medium text-gray-600 block">Дата доставки:</label>
+                        <input type="date" id="targetDate" class="border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500">
+                    </div>
+                    <div class="self-end">
+                        <button onclick="loadRaznaryadka()" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 transition">Сформировать</button>
+                    </div>
                 </div>
             </header>
 
             <div id="resultContainer" class="space-y-8">
                 <div class="bg-white shadow rounded-lg p-8 text-center text-gray-400">
-                    Выберите дату и нажмите «Сформировать».
+                    Выберите регион, дату и нажмите «Сформировать».
                 </div>
             </div>
         </div>
@@ -94,6 +93,7 @@ def get_dashboard():
 
             async function loadRaznaryadka() {
                 const dateStr = document.getElementById('targetDate').value;
+                const region = document.getElementById('regionSelect').value;
                 const container = document.getElementById('resultContainer');
                 
                 if (!dateStr) {
@@ -101,10 +101,10 @@ def get_dashboard():
                     return;
                 }
 
-                container.innerHTML = '<div class="text-center py-12 text-gray-500">Считывание Excel меню и расчет по 24 точкам...</div>';
+                container.innerHTML = '<div class="text-center py-12 text-gray-500">Загрузка данных из Excel файлов...</div>';
 
                 try {
-                    const response = await fetch(`/api/raznaryadka/${dateStr}`);
+                    const response = await fetch(`/api/raznaryadka/${dateStr}?region=${region}`);
                     const data = await response.json();
 
                     if (!data.is_working_day) {
@@ -118,24 +118,28 @@ def get_dashboard():
                     }
 
                     let html = `
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
                             <div class="bg-white shadow rounded-lg p-6 border-t-4 border-blue-500">
                                 <h3 class="text-sm font-medium text-gray-500">Дата</h3>
-                                <p class="text-2xl font-bold text-gray-800 mt-1">${data.date}</p>
+                                <p class="text-xl font-bold text-gray-800 mt-1">${data.date}</p>
                             </div>
                             <div class="bg-white shadow rounded-lg p-6 border-t-4 border-green-500">
-                                <h3 class="text-sm font-medium text-gray-500">Активное меню (из Excel)</h3>
-                                <p class="text-2xl font-bold text-gray-800 mt-1">Меню № ${data.menu_number}</p>
+                                <h3 class="text-sm font-medium text-gray-500">Регион</h3>
+                                <p class="text-xl font-bold text-gray-800 mt-1">${data.region}</p>
                             </div>
                             <div class="bg-white shadow rounded-lg p-6 border-t-4 border-purple-500">
-                                <h3 class="text-sm font-medium text-gray-500">Всего точек</h3>
-                                <p class="text-2xl font-bold text-blue-600 mt-1">24 объекта</p>
+                                <h3 class="text-sm font-medium text-gray-500">Меню (из Excel)</h3>
+                                <p class="text-xl font-bold text-gray-800 mt-1">Меню № ${data.menu_number}</p>
+                            </div>
+                            <div class="bg-white shadow rounded-lg p-6 border-t-4 border-orange-500">
+                                <h3 class="text-sm font-medium text-gray-500">Кол-во точек МТТ</h3>
+                                <p class="text-xl font-bold text-orange-600 mt-1">${data.points_count} объектов</p>
                             </div>
                         </div>
 
                         <div class="bg-white shadow rounded-lg overflow-hidden">
                             <div class="bg-gray-50 px-6 py-4 border-b border-gray-200">
-                                <h3 class="text-lg font-medium text-gray-900">📦 Сводный список закупки (кг / литры)</h3>
+                                <h3 class="text-lg font-medium text-gray-900">📦 Сводный список закупки для сектора "${data.region}"</h3>
                             </div>
                             <div class="p-6 overflow-x-auto">
                                 <table class="min-w-full divide-y divide-gray-200">
@@ -167,7 +171,7 @@ def get_dashboard():
 
                         <div class="bg-white shadow rounded-lg overflow-hidden">
                             <div class="bg-gray-50 px-6 py-4 border-b border-gray-200">
-                                <h3 class="text-lg font-medium text-gray-900">📍 Детализация по 24 точкам</h3>
+                                <h3 class="text-lg font-medium text-gray-900">📍 Детализация по точкам МТТ (${data.region})</h3>
                             </div>
                             <div class="p-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                     `;
@@ -205,7 +209,7 @@ def get_dashboard():
                     container.innerHTML = html;
 
                 } catch (error) {
-                    container.innerHTML = '<div class="text-center py-12 text-red-500">Ошибка при расчете данных. Проверьте структуру файла Menu.xlsx.</div>';
+                    container.innerHTML = '<div class="text-center py-12 text-red-500">Ошибка при расчете. Проверьте структуру Excel файлов.</div>';
                     console.error(error);
                 }
             }
@@ -219,8 +223,11 @@ def get_dashboard():
 
 
 @app.get("/api/raznaryadka/{target_date}")
-def get_raznaryadka_by_date(target_date: str):
-  """Формирует разнарядку, считывая техкарту из нужного листа Menu.xlsx."""
+def get_raznaryadka_by_date(target_date: str, region: str = "Город"):
+  """Формирует разнарядку, считывая точки из Location.xlsx (Город или Район)
+
+  и техкарты из Menu.xlsx.
+  """
   try:
     parsed_date = date.fromisoformat(target_date)
   except ValueError:
@@ -236,13 +243,14 @@ def get_raznaryadka_by_date(target_date: str):
         "message": "В этот день выходной или праздник. Разнарядка не нужна.",
     }
 
-  # Загружаем граммовки из Excel для текущего меню (1-10)
+  # Загружаем точки из выбранного листа Location.xlsx ('Город' или 'Район')
+  points_dict = load_points_from_excel(region)
   ttk_items = load_menu_from_excel(menu_num)
 
   points_report = []
   summary_ingredients = {}
 
-  for point_id, point_info in POINTS.items():
+  for point_id, point_info in points_dict.items():
     children = point_info["children_count"]
     point_needs = {}
 
@@ -261,15 +269,16 @@ def get_raznaryadka_by_date(target_date: str):
         "needs": point_needs,
     })
 
-  # Округляем общие итоги
   summary_rounded = {
       prod: round(qty, 2) for prod, qty in summary_ingredients.items()
   }
 
   return {
       "date": parsed_date.isoformat(),
+      "region": region,
       "is_working_day": True,
       "menu_number": menu_num,
+      "points_count": len(points_dict),
       "points_breakdown": points_report,
       "total_purchase_list": summary_rounded,
   }
