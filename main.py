@@ -27,7 +27,6 @@ def save_manual_settings(settings: dict):
 
 
 def load_stock_settings() -> dict:
-  """Структура: { region: { point_id: { product_name: qty } } }"""
   if os.path.exists(STOCK_FILE):
     try:
       with open(STOCK_FILE, "r", encoding="utf-8") as f:
@@ -147,7 +146,7 @@ def load_menu_from_excel(menu_num: int) -> dict:
       else:
         qty_in_kg = val
         display_unit = unit if unit else "шт"
-      menu_items[prod_name] = {"unit": display_unit}
+      menu_items[prod_name] = {"qty_per_child": qty_in_kg, "unit": display_unit}
     return menu_items
   except Exception as e:
     print(f"Ошибка чтения листа {sheet_name}: {e}")
@@ -155,7 +154,6 @@ def load_menu_from_excel(menu_num: int) -> dict:
 
 
 def get_all_products_with_units() -> dict:
-  """Собирает все продукты и их единицы измерения со всех листов меню."""
   products = {}
   for i in range(1, 11):
     items = load_menu_from_excel(i)
@@ -190,7 +188,6 @@ def get_dashboard():
                 </div>
             </nav>
 
-            <!-- Вкладка 1: Матрица -->
             <div id="tabMatrix" class="space-y-6">
                 <header class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center">
                     <div>
@@ -219,7 +216,6 @@ def get_dashboard():
                 </div>
             </div>
 
-            <!-- Вкладка 2: Календарь -->
             <div id="tabCalendar" class="hidden space-y-6">
                 <header class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center">
                     <div>
@@ -240,7 +236,6 @@ def get_dashboard():
                 </div>
             </div>
 
-            <!-- Вкладка 3: Начальные остатки (Матрица: Продукты х МТТ) -->
             <div id="tabStock" class="hidden space-y-6">
                 <header class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center">
                     <div>
@@ -260,7 +255,6 @@ def get_dashboard():
                         </div>
                     </div>
                 </header>
-
                 <div class="bg-white shadow rounded-lg overflow-hidden">
                     <div id="stockMatrixContainer" class="overflow-x-auto" style="max-height: 700px;">
                         <p class="p-8 text-center text-gray-400">Загрузка матрицы остатков...</p>
@@ -269,7 +263,6 @@ def get_dashboard():
             </div>
         </div>
 
-        <!-- Модальное окно календаря -->
         <div id="dayModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
             <div class="bg-white rounded-lg p-6 w-96 shadow-xl space-y-4">
                 <h3 id="modalDateTitle" class="font-bold text-lg text-gray-800">Настройка дня</h3>
@@ -332,7 +325,7 @@ def get_dashboard():
 
             async function loadCalendarGrid() {
                 const monthNames = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
-                document.getElementById('currentMonthLabel').innerText = `${monthNames[viewMonth]}${viewYear}`;
+                document.getElementById('currentMonthLabel').innerText = `${monthNames[viewMonth]} ${viewYear}`;
 
                 const lastDay = new Date(viewYear, viewMonth + 1, 0);
                 const startStr = `${viewYear}-${String(viewMonth + 1).padStart(2, '0')}-01`;
@@ -369,9 +362,10 @@ def get_dashboard():
                     }
 
                     grid.innerHTML += `
-                        <div onclick="openDayModal('${dStr}',${info.is_holiday}, ${info.menu !== null ? info.menu : 'null'})" class="border ${bgClass} rounded-lg p-3 min-h-[105px] flex flex-col justify-between cursor-pointer shadow-sm transition">
+                        <div onclick="openDayModal('${dStr}', ${info.is_holiday}, ${info.menu !== null ? info.menu : 'null'})" class="border ${bgClass} rounded-lg p-3 min-h-[105px] flex flex-col justify-between cursor-pointer shadow-sm transition">
                             <div class="flex justify-between items-center">
-                                <span class="font-bold text-sm text-gray-700">${d}</span>${info.forced ? '<span class="text-[10px] bg-purple-200 text-purple-800 px-1 rounded">Fix</span>' : ''}
+                                <span class="font-bold text-sm text-gray-700">${d}</span>
+                                ${info.forced ? '<span class="text-[10px] bg-purple-200 text-purple-800 px-1 rounded">Fix</span>' : ''}
                             </div>
                             <div class="text-center my-auto">
                                 <span class="inline-block px-2.5 py-1 rounded-md text-xs font-bold ${badgeBg}">${statusText}</span>
@@ -410,7 +404,7 @@ def get_dashboard():
                 container.innerHTML = '<div class="text-center py-12 text-gray-500">Загрузка матрицы остатков...</div>';
 
                 const res = await fetch(`/api/stock/matrix/${region}`);
-                const data = await res.json(); // { points: [...], products: { prodName: { unit: 'кг', points_stock: {point_id: qty} } } }
+                const data = await res.json();
 
                 let html = `
                     <table class="min-w-full divide-y divide-gray-200 text-xs border-collapse">
@@ -437,4 +431,246 @@ def get_dashboard():
                         const val = pInfo.points_stock[p.id] || 0;
                         html += `
                             <td class="px-2 py-1.5 text-center border-r">
-                                <input
+                                <input type="number" step="0.01" data-point="${p.id}" data-product="${prodName}" value="${val}" class="stock-cell border border-gray-200 rounded px-1.5 py-1 text-center text-xs w-20 focus:ring-2 focus:ring-blue-500">
+                            </td>
+                        `;
+                    });
+
+                    html += `</tr>`;
+                }
+
+                html += `</tbody></table>`;
+                container.innerHTML = html;
+            }
+
+            async function saveStockMatrix() {
+                const region = document.getElementById('stockRegionSelect').value;
+                const cells = document.querySelectorAll('.stock-cell');
+                
+                const stockPayload = {};
+                cells.forEach(cell => {
+                    const pid = cell.getAttribute('data-point');
+                    const prod = cell.getAttribute('data-product');
+                    const val = parseFloat(cell.value) || 0.0;
+
+                    if (!stockPayload[pid]) stockPayload[pid] = {};
+                    stockPayload[pid][prod] = val;
+                });
+
+                const res = await fetch(`/api/stock/matrix/${region}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(stockPayload)
+                });
+
+                if (res.ok) {
+                    alert('Все остатки успешно сохранены!');
+                } else {
+                    alert('Ошибка сохранения остатков.');
+                }
+            }
+
+            async function loadMatrixRaznaryadka() {
+                const dateStr = document.getElementById('targetDate').value;
+                const region = document.getElementById('regionSelect').value;
+                const container = document.getElementById('matrixResultContainer');
+                
+                if (!dateStr) { alert('Выберите дату'); return; }
+                container.innerHTML = '<div class="text-center py-12 text-gray-500">Формирование матрицы...</div>';
+
+                try {
+                    const response = await fetch(`/api/raznaryadka/matrix/${dateStr}?region=${region}`);
+                    const data = await response.json();
+
+                    let html = `
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                            <div class="bg-white shadow rounded-lg p-6 border-t-4 border-blue-500">
+                                <h3 class="text-sm font-medium text-gray-500">Период недели</h3>
+                                <p class="text-lg font-bold text-gray-800 mt-1">${data.week_start} — ${data.week_end}</p>
+                            </div>
+                            <div class="bg-white shadow rounded-lg p-6 border-t-4 border-green-500">
+                                <h3 class="text-sm font-medium text-gray-500">Регион</h3>
+                                <p class="text-lg font-bold text-gray-800 mt-1">${data.region} (${data.points.length} точек)</p>
+                            </div>
+                            <div class="bg-white shadow rounded-lg p-6 border-t-4 border-purple-500">
+                                <h3 class="text-sm font-medium text-gray-500">Активные дни</h3>
+                                <p class="text-lg font-bold text-purple-600 mt-1">${data.working_days_count} рабочих дней</p>
+                            </div>
+                        </div>
+
+                        <div class="bg-white shadow rounded-lg overflow-hidden">
+                            <div class="bg-gray-50 px-6 py-4 border-b border-gray-200">
+                                <h3 class="text-lg font-medium text-gray-900">📊 Сводная матрица закупки на неделю</h3>
+                            </div>
+                            <div class="overflow-x-auto" style="max-height: 700px;">
+                                <table class="min-w-full divide-y divide-gray-200 text-xs border-collapse">
+                                    <thead class="bg-gray-100 sticky top-0 z-10">
+                                        <tr>
+                                            <th class="px-4 py-3 text-left font-bold text-gray-700 border-r bg-gray-100 sticky left-0 z-20 min-w-[180px]">Продукт</th>
+                                            <th class="px-3 py-3 text-center font-bold text-gray-700 border-r bg-gray-100 min-w-[70px]">Ед.</th>
+                    `;
+
+                    data.points.forEach(point => {
+                        html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]">${point.name}<br><span class="text-[10px] text-blue-600">(${point.children_count} дет)</span></th>`;
+                    });
+
+                    html += `
+                                            <th class="px-4 py-3 text-center font-bold text-blue-800 bg-blue-50">ИТОГО ЗА НЕДЕЛЮ</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="divide-y divide-gray-200 bg-white">
+                    `;
+
+                    for (const [prodName, rowData] of Object.entries(data.matrix)) {
+                        html += `
+                            <tr class="hover:bg-gray-50">
+                                <td class="px-4 py-3 font-medium text-gray-900 border-r bg-white sticky left-0 z-10">${prodName}</td>
+                                <td class="px-3 py-3 text-center text-gray-500 border-r bg-gray-50">${rowData.unit}</td>
+                        `;
+                        data.points.forEach(point => {
+                            const val = rowData.points_qty[point.id] || 0;
+                            html += `<td class="px-3 py-3 text-center border-r text-gray-700 ${val > 0 ? 'font-semibold' : 'text-gray-300'}">${val > 0 ? val : '-'}</td>`;
+                        });
+                        html += `
+                                <td class="px-4 py-3 text-center font-bold text-blue-900 bg-blue-50">${rowData.weekly_total}</td>
+                            </tr>
+                        `;
+                    }
+
+                    html += `</tbody></table></div></div>`;
+                    container.innerHTML = html;
+                } catch (err) {
+                    container.innerHTML = '<div class="text-center py-12 text-red-500">Ошибка загрузки матрицы.</div>';
+                }
+            }
+
+            window.onload = loadMatrixRaznaryadka;
+        </script>
+    </body>
+    </html>
+    """
+  return HTMLResponse(content=html_content)
+
+
+@app.get("/api/stock/matrix/{region}")
+def get_stock_matrix_api(region: str):
+  points_dict = load_points_from_excel(region)
+  points_list = [
+      {
+          "id": pid,
+          "name": p["name"],
+          "children_count": p["children_count"],
+      }
+      for pid, p in points_dict.items()
+  ]
+
+  all_products = get_all_products_with_units()
+  stock_data = load_stock_settings().get(region, {})
+
+  products_matrix = {}
+  for prodName, unit in all_products.items():
+    points_stock = {}
+    for pid in points_dict.keys():
+      points_stock[pid] = stock_data.get(str(pid), {}).get(prodName, 0.0)
+
+    products_matrix[prodName] = {"unit": unit, "points_stock": points_stock}
+
+  return {"points": points_list, "products": products_matrix}
+
+
+@app.post("/api/stock/matrix/{region}")
+def save_stock_matrix_api(region: str, data: dict):
+  stock_data = load_stock_settings()
+  stock_data[region] = data
+  save_stock_settings(stock_data)
+  return {"status": "success"}
+
+
+@app.get("/api/calendar/range")
+def get_calendar_range_api(start: str, end: str):
+  try:
+    s_date = date.fromisoformat(start)
+    e_date = date.fromisoformat(end)
+  except ValueError:
+    raise HTTPException(status_code=400, detail="Неверный формат дат")
+  return calculate_calendar_dynamic(s_date, e_date)
+
+
+@app.post("/api/calendar/settings")
+def save_setting_api(data: dict):
+  date_str = data.get("date")
+  if not date_str:
+    raise HTTPException(status_code=400, detail="Дата обязательна")
+  settings = load_manual_settings()
+  settings["days"][date_str] = {
+      "is_holiday": data.get("is_holiday", False),
+      "menu": data.get("menu"),
+  }
+  save_manual_settings(settings)
+  return {"status": "success"}
+
+
+@app.get("/api/raznaryadka/matrix/{target_date}")
+def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
+  try:
+    parsed_date = date.fromisoformat(target_date)
+  except ValueError:
+    raise HTTPException(status_code=400, detail="Неверный формат дат")
+
+  start_of_week = parsed_date - timedelta(days=parsed_date.weekday())
+  week_days = [start_of_week + timedelta(days=i) for i in range(5)]
+
+  points_dict = load_points_from_excel(region)
+  points_list = [
+      {
+          "id": pid,
+          "name": pinfo["name"],
+          "children_count": pinfo["children_count"],
+      }
+      for pid, pinfo in points_dict.items()
+  ]
+
+  matrix_data = {}
+  working_days_count = 0
+
+  for day in week_days:
+    menu_num = get_menu_number_for_date_custom(day)
+    if menu_num is None:
+      continue
+
+    working_days_count += 1
+    ttk_items = load_menu_from_excel(menu_num)
+
+    for point_id, point_info in points_dict.items():
+      children = point_info["children_count"]
+      for prod_name, data in ttk_items.items():
+        kg_per_child = data.get("qty_per_child", 0.0)
+        unit = data["unit"]
+        needed = kg_per_child * children
+
+        if prod_name not in matrix_data:
+          matrix_data[prod_name] = {
+              "unit": unit,
+              "points_qty": {pid: 0.0 for pid in points_dict.keys()},
+              "weekly_total": 0.0,
+          }
+        matrix_data[prod_name]["points_qty"][point_id] += needed
+        matrix_data[prod_name]["weekly_total"] += needed
+
+  for prod_name in matrix_data:
+    matrix_data[prod_name]["weekly_total"] = round(
+        matrix_data[prod_name]["weekly_total"], 2
+    )
+    for pid in matrix_data[prod_name]["points_qty"]:
+      matrix_data[prod_name]["points_qty"][pid] = round(
+          matrix_data[prod_name]["points_qty"][pid], 2
+      )
+
+  return {
+      "week_start": week_days[0].isoformat(),
+      "week_end": week_days[4].isoformat(),
+      "region": region,
+      "working_days_count": working_days_count,
+      "points": points_list,
+      "matrix": matrix_data,
+  }
