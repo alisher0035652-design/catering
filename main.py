@@ -66,22 +66,22 @@ def load_menu_from_excel(menu_num: int) -> dict:
 
 @app.get("/", response_class=HTMLResponse)
 def get_dashboard():
-  """Дашборд логиста с разнарядкой на неделю."""
+  """Дашборд логиста в матричном виде (Продукты х МТТ)."""
   html_content = """
     <!DOCTYPE html>
     <html lang="ru">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Разнарядка Кетеринг на неделю</title>
+        <title>Разнарядка Кетеринг (Матрица)</title>
         <script src="https://cdn.tailwindcss.com"></script>
     </head>
     <body class="bg-gray-50 text-gray-800 font-sans">
-        <div class="max-w-7xl mx-auto px-4 py-8">
+        <div class="max-w-[95%] mx-auto px-4 py-8">
             <header class="bg-white shadow rounded-lg p-6 mb-8 flex flex-col md:flex-row justify-between items-center">
                 <div>
-                    <h1 class="text-2xl font-bold text-blue-600">🍽 Разнарядка Кетеринг — Планирование на Неделю</h1>
-                    <p class="text-sm text-gray-500 mt-1">Расчет продуктов на всю рабочую неделю (Пн-Пт) из Menu.xlsx и Location.xlsx</p>
+                    <h1 class="text-2xl font-bold text-blue-600">🍽 Матричная Разнарядка Кетеринг</h1>
+                    <p class="text-sm text-gray-500 mt-1">Продукты по строкам, точки МТТ по столбцам на всю неделю (Пн-Пт)</p>
                 </div>
                 <div class="mt-4 md:mt-0 flex flex-wrap items-center gap-3">
                     <div>
@@ -92,18 +92,18 @@ def get_dashboard():
                         </select>
                     </div>
                     <div>
-                        <label class="text-xs font-medium text-gray-600 block">Любой день недели:</label>
+                        <label class="text-xs font-medium text-gray-600 block">Дата недели:</label>
                         <input type="date" id="targetDate" class="border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500">
                     </div>
                     <div class="self-end">
-                        <button onclick="loadWeeklyRaznaryadka()" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 transition">Сформировать на неделю</button>
+                        <button onclick="loadMatrixRaznaryadka()" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 transition">Сформировать матрицу</button>
                     </div>
                 </div>
             </header>
 
             <div id="resultContainer" class="space-y-8">
                 <div class="bg-white shadow rounded-lg p-8 text-center text-gray-400">
-                    Выберите дату, регион и нажмите «Сформировать на неделю».
+                    Выберите дату, регион и нажмите «Сформировать матрицу».
                 </div>
             </div>
         </div>
@@ -111,7 +111,7 @@ def get_dashboard():
         <script>
             document.getElementById('targetDate').valueAsDate = new Date();
 
-            async function loadWeeklyRaznaryadka() {
+            async function loadMatrixRaznaryadka() {
                 const dateStr = document.getElementById('targetDate').value;
                 const region = document.getElementById('regionSelect').value;
                 const container = document.getElementById('resultContainer');
@@ -121,51 +121,72 @@ def get_dashboard():
                     return;
                 }
 
-                container.innerHTML = '<div class="text-center py-12 text-gray-500">Расчет разнарядки на всю неделю по 5 рабочим дням...</div>';
+                container.innerHTML = '<div class="text-center py-12 text-gray-500">Формирование матричной разнарядки на неделю...</div>';
 
                 try {
-                    const response = await fetch(`/api/raznaryadka/week/${dateStr}?region=${region}`);
+                    const response = await fetch(`/api/raznaryadka/matrix/${dateStr}?region=${region}`);
                     const data = await response.json();
 
                     let html = `
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
                             <div class="bg-white shadow rounded-lg p-6 border-t-4 border-blue-500">
                                 <h3 class="text-sm font-medium text-gray-500">Период недели</h3>
                                 <p class="text-lg font-bold text-gray-800 mt-1">${data.week_start} — ${data.week_end}</p>
                             </div>
                             <div class="bg-white shadow rounded-lg p-6 border-t-4 border-green-500">
-                                <h3 class="text-sm font-medium text-gray-500">Регион / Точки</h3>
-                                <p class="text-lg font-bold text-gray-800 mt-1">${data.region} (${data.points_count} точек)</p>
+                                <h3 class="text-sm font-medium text-gray-500">Регион</h3>
+                                <p class="text-lg font-bold text-gray-800 mt-1">${data.region} (${data.points.length} точек МТТ)</p>
                             </div>
                             <div class="bg-white shadow rounded-lg p-6 border-t-4 border-purple-500">
-                                <h3 class="text-sm font-medium text-gray-500">Рабочих дней в расчете</h3>
-                                <p class="text-lg font-bold text-purple-600 mt-1">${data.working_days.length} дня (Пн-Пт)</p>
+                                <h3 class="text-sm font-medium text-gray-500">Рабочих дней</h3>
+                                <p class="text-lg font-bold text-purple-600 mt-1">5 дней (Пн-Пт)</p>
                             </div>
                         </div>
 
-                        <!-- Сводный список закупки на всю неделю -->
+                        <!-- Матричная таблица -->
                         <div class="bg-white shadow rounded-lg overflow-hidden">
-                            <div class="bg-gray-50 px-6 py-4 border-b border-gray-200">
-                                <h3 class="text-lg font-medium text-gray-900">📦 Итоговый список закупки НА ВСЮ НЕДЕЛЮ для сектора "${data.region}"</h3>
+                            <div class="bg-gray-50 px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+                                <h3 class="text-lg font-medium text-gray-900">📊 Сводная матрица закупки на неделю (Продукты × Точки МТТ)</h3>
+                                <span class="text-xs text-gray-500">Объемы указаны в кг / шт</span>
                             </div>
-                            <div class="p-6 overflow-x-auto">
-                                <table class="min-w-full divide-y divide-gray-200">
-                                    <thead>
+                            <div class="overflow-x-auto" style="max-height: 700px;">
+                                <table class="min-w-full divide-y divide-gray-200 text-xs border-collapse">
+                                    <thead class="bg-gray-100 sticky top-0 z-10">
                                         <tr>
-                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Продукт</th>
-                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Общий объем за неделю</th>
-                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Ед. изм.</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody class="divide-y divide-gray-200">
+                                            <th class="px-4 py-3 text-left font-bold text-gray-700 border-r bg-gray-100 sticky left-0 z-20 min-w-[180px]">Продукт</th>
+                                            <th class="px-3 py-3 text-center font-bold text-gray-700 border-r bg-gray-100 min-w-[70px]">Ед.</th>
                     `;
 
-                    for (const [prodName, item] of Object.entries(data.weekly_purchase_list)) {
+                    // Заголовки столбцов - названия точек МТТ
+                    data.points.forEach(point => {
+                        html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]" title="Детей: ${point.children_count}">${point.name}<br><span class="text-[10px] text-blue-600">(${point.children_count} дет)</span></th>`;
+                    });
+
+                    html += `
+                                            <th class="px-4 py-3 text-center font-bold text-blue-800 bg-blue-50">ИТОГО ЗА НЕДЕЛЮ</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="divide-y divide-gray-200 bg-white">
+                    `;
+
+                    // Строки матрицы по каждому продукту
+                    for (const [prodName, rowData] of Object.entries(data.matrix)) {
                         html += `
+                            hover:bg-gray-50
                             <tr>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">${prodName}</td>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700 font-bold">${item.total_qty}</td>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${item.unit}</td>
+                                <td class="px-4 py-3 font-medium text-gray-900 border-r bg-white sticky left-0 z-10">${prodName}</td>
+                                <td class="px-3 py-3 text-center text-gray-500 border-r bg-gray-50">${rowData.unit}</td>
+                        `;
+
+                        // Значения по каждой точке МТТ
+                        data.points.forEach(point => {
+                            const val = rowData.points_qty[point.id] || 0;
+                            html += `<td class="px-3 py-3 text-center border-r text-gray-700 ${val > 0 ? 'font-semibold' : 'text-gray-300'}">${val > 0 ? val : '-'}</td>`;
+                        });
+
+                        // Итоговая колонка по продукту
+                        html += `
+                                <td class="px-4 py-3 text-center font-bold text-blue-900 bg-blue-50">${rowData.weekly_total}</td>
                             </tr>
                         `;
                     }
@@ -175,55 +196,17 @@ def get_dashboard():
                                 </table>
                             </div>
                         </div>
-
-                        <!-- Детализация по дням недели -->
-                        <div class="space-y-6">
-                            <h3 class="text-xl font-bold text-gray-800">📅 Детализация по дням недели</h3>
                     `;
 
-                    data.working_days.forEach(day => {
-                        html += `
-                            <div class="bg-white shadow rounded-lg overflow-hidden">
-                                <div class="bg-blue-50 px-6 py-3 border-b border-gray-200 flex justify-between items-center">
-                                    <h4 class="font-bold text-blue-900">Дата: ${day.date} (Меню № ${day.menu_number})</h4>
-                                    <span class="text-xs text-gray-600">Всего точек: ${data.points_count}</span>
-                                </div>
-                                <div class="p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                        `;
-
-                        day.points_breakdown.forEach(point => {
-                            html += `
-                                <div class="border border-gray-200 rounded-lg p-3 bg-gray-50">
-                                    <div class="flex justify-between items-center mb-2">
-                                        <span class="font-bold text-xs text-gray-800">${point.point_name}</span>
-                                        <span class="bg-blue-100 text-blue-800 text-[10px] font-semibold px-2 py-0.5 rounded">Детей: ${point.children_count}</span>
-                                    </div>
-                                    <ul class="divide-y divide-gray-200 text-xs">
-                            `;
-                            for (const [prodName, need] of Object.entries(point.needs)) {
-                                html += `
-                                    <li class="py-1 flex justify-between">
-                                        <span class="text-gray-600">${prodName}:</span>
-                                        <span class="font-medium text-gray-900">${need.qty} ${need.unit}</span>
-                                    </li>
-                                `;
-                            }
-                            html += `</ul></div>`;
-                        });
-
-                        html += `</div></div>`;
-                    });
-
-                    html += `</div>`;
                     container.innerHTML = html;
 
                 } catch (error) {
-                    container.innerHTML = '<div class="text-center py-12 text-red-500">Ошибка при расчете недели. Проверьте данные.</div>';
+                    container.innerHTML = '<div class="text-center py-12 text-red-500">Ошибка при формировании матрицы.</div>';
                     console.error(error);
                 }
             }
 
-            window.onload = loadWeeklyRaznaryadka;
+            window.onload = loadMatrixRaznaryadka;
         </script>
     </body>
     </html>
@@ -231,11 +214,11 @@ def get_dashboard():
   return HTMLResponse(content=html_content)
 
 
-@app.get("/api/raznaryadka/week/{target_date}")
-def get_weekly_raznaryadka(target_date: str, region: str = "Город"):
-  """Считает разнарядку на всю рабочую неделю (Пн-Пт), в которую входит
+@app.get("/api/raznaryadka/matrix/{target_date}")
+def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
+  """Гформирует матрицу: Продукты в строках, точки МТТ в столбцах (суммарно за
 
-  target_date.
+  неделю).
   """
   try:
     parsed_date = date.fromisoformat(target_date)
@@ -244,70 +227,64 @@ def get_weekly_raznaryadka(target_date: str, region: str = "Город"):
         status_code=400, detail="Неверный формат даты. Используйте ГГГГ-ММ-ДД"
     )
 
-  # Находим понедельник текущей недели
+  # Пн-Пт текущей недели
   start_of_week = parsed_date - timedelta(days=parsed_date.weekday())
-  # Рабочая неделя: Пн (0) - Пт (4)
   week_days = [start_of_week + timedelta(days=i) for i in range(5)]
 
   points_dict = load_points_from_excel(region)
-  weekly_summary = {}
-  daily_reports = []
+
+  # Подготавливаем структуру точек для ответа
+  points_list = [
+      {
+          "id": pid,
+          "name": pinfo["name"],
+          "children_count": pinfo["children_count"],
+      }
+      for pid, pinfo in points_dict.items()
+  ]
+
+  # Собираем данные за все рабочие дни недели
+  matrix_data = {}  # { prod_name: { unit: 'кг', points_qty: {point_id: qty}, weekly_total: 0 } }
 
   for day in week_days:
     menu_num = get_menu_number_for_date(day)
     if menu_num is None:
-      continue  # Пропускаем выходные/праздники если попали
+      continue
 
     ttk_items = load_menu_from_excel(menu_num)
-    points_report = []
 
     for point_id, point_info in points_dict.items():
       children = point_info["children_count"]
-      point_needs = {}
 
       for prod_name, data in ttk_items.items():
         kg_per_child = data["qty_per_child"]
         unit = data["unit"]
+        needed = kg_per_child * children
 
-        total_needed = kg_per_child * children
-        rounded_qty = round(total_needed, 2)
+        if prod_name not in matrix_data:
+          matrix_data[prod_name] = {
+              "unit": unit,
+              "points_qty": {pid: 0.0 for pid in points_dict.keys()},
+              "weekly_total": 0.0,
+          }
 
-        point_needs[prod_name] = {
-            "qty": rounded_qty,
-            "unit": unit,
-        }
+        matrix_data[prod_name]["points_qty"][point_id] += needed
+        matrix_data[prod_name]["weekly_total"] += needed
 
-        # Суммируем в общий недельный закуп
-        if prod_name not in weekly_summary:
-          weekly_summary[prod_name] = {"total_qty": 0.0, "unit": unit}
-        weekly_summary[prod_name]["total_qty"] += total_needed
-
-      points_report.append({
-          "point_id": point_id,
-          "point_name": point_info["name"],
-          "children_count": children,
-          "needs": point_needs,
-      })
-
-    daily_reports.append({
-        "date": day.isoformat(),
-        "menu_number": menu_num,
-        "points_breakdown": points_report,
-    })
-
-  weekly_summary_rounded = {
-      prod: {
-          "total_qty": round(info["total_qty"], 2),
-          "unit": info["unit"],
-      }
-      for prod, info in weekly_summary.items()
-  }
+  # Округляем значения в матрице
+  for prod_name in matrix_data:
+    matrix_data[prod_name]["weekly_total"] = round(
+        matrix_data[prod_name]["weekly_total"], 2
+    )
+    for pid in matrix_data[prod_name]["points_qty"]:
+      matrix_data[prod_name]["points_qty"][pid] = round(
+          matrix_data[prod_name]["points_qty"][pid], 2
+      )
 
   return {
       "week_start": week_days[0].isoformat(),
       "week_end": week_days[4].isoformat(),
       "region": region,
-      "points_count": len(points_dict),
-      "working_days": daily_reports,
-      "weekly_purchase_list": weekly_summary_rounded,
+      "points": points_list,
+      "matrix": matrix_data,
   }
