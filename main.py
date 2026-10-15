@@ -8,18 +8,13 @@ app = FastAPI(title="Catering Management API", version="1.0.0")
 
 
 def load_points_from_excel(region: str = "Город") -> dict:
-  """Загружает список точек (МТТ) и точное количество детей из файла
-
-  Location.xlsx. Колонка 0: Название МТТ Колонка 1: Количество детей (берется
-  напрямую из Excel, без добавок)
-  """
+  """Загружает список точек (МТТ) и точное количество детей из Location.xlsx."""
   try:
     df = pd.read_excel("Location.xlsx", sheet_name=region, header=None)
     points = {}
     for idx, row in df.iterrows():
       mtt_name = str(row.iloc[0]).strip()
       if mtt_name and mtt_name != "nan":
-        # Считываем детей из второй колонки (индекс 1). Если пусто или NaN, ставим 0.
         children = 0
         if len(row) > 1 and pd.notna(row.iloc[1]):
           try:
@@ -38,15 +33,34 @@ def load_points_from_excel(region: str = "Город") -> dict:
 
 
 def load_menu_from_excel(menu_num: int) -> dict:
-  """Загружает техкарту из листа Menu.xlsx (перевод граммов в кг/л)."""
+  """Загружает техкарту из листа Menu.xlsx.
+
+  Колонка 0: Название продукта Колонка 1: Расход на 1 ребенка Колонка 2: Ед. изм.
+  (Грамм -> переводим в кг, деля на 1000)
+  """
   sheet_name = f"{menu_num}-Меню"
   try:
     df = pd.read_excel("Menu.xlsx", sheet_name=sheet_name)
     menu_items = {}
     for _, row in df.iterrows():
       prod_name = str(row.iloc[0]).strip()
-      grams_per_child = float(row.iloc[1]) if pd.notna(row.iloc[1]) else 0.0
-      menu_items[prod_name] = grams_per_child / 1000.0
+      val = float(row.iloc[1]) if pd.notna(row.iloc[1]) else 0.0
+
+      # Проверяем 3-ю колонку на единицу измерения (если есть)
+      unit = str(row.iloc[2]).strip().lower() if len(row) > 2 and pd.notna(row.iloc[2]) else "граммов"
+
+      # Если указано в граммах, переводим в килограммы для закупа
+      if "грам" in unit or "гр" in unit:
+        qty_in_kg = val / 1000.0
+        display_unit = "кг"
+      else:
+        qty_in_kg = val
+        display_unit = unit if unit else "шт"
+
+      menu_items[prod_name] = {
+          "qty_per_child": qty_in_kg,
+          "unit": display_unit,
+      }
     return menu_items
   except Exception as e:
     print(f"Ошибка чтения листа {sheet_name}: {e}")
@@ -55,7 +69,7 @@ def load_menu_from_excel(menu_num: int) -> dict:
 
 @app.get("/", response_class=HTMLResponse)
 def get_dashboard():
-  """Дашборд логиста с выбором региона (Город / Район) и даты."""
+  """Дашборд логиста с выбором региона и даты."""
   html_content = """
     <!DOCTYPE html>
     <html lang="ru">
@@ -70,7 +84,7 @@ def get_dashboard():
             <header class="bg-white shadow rounded-lg p-6 mb-8 flex flex-col md:flex-row justify-between items-center">
                 <div>
                     <h1 class="text-2xl font-bold text-blue-600">🍽 Управление Разнарядкой Кетеринга</h1>
-                    <p class="text-sm text-gray-500 mt-1">Данные точек и детей берутся напрямую из Location.xlsx</p>
+                    <p class="text-sm text-gray-500 mt-1">Автоматический расчет из Menu.xlsx (с учетом ед. изм.) и Location.xlsx</p>
                 </div>
                 <div class="mt-4 md:mt-0 flex flex-wrap items-center gap-3">
                     <div>
@@ -162,12 +176,12 @@ def get_dashboard():
                                     <tbody class="divide-y divide-gray-200">
                     `;
 
-                    for (const [prodName, totalQty] of Object.entries(data.total_purchase_list)) {
+                    for (const [prodName, item] of Object.entries(data.total_purchase_list)) {
                         html += `
                             <tr>
                                 <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">${prodName}</td>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700 font-bold">${totalQty}</td>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">кг / л</td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700 font-bold">${item.total_qty}</td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${item.unit}</td>
                             </tr>
                         `;
                     }
@@ -195,11 +209,11 @@ def get_dashboard():
                                 <ul class="divide-y divide-gray-200 text-xs">
                         `;
                         
-                        for (const [prodName, qty] of Object.entries(point.needs)) {
+                        for (const [prodName, need] of Object.entries(point.needs)) {
                             html += `
                                 <li class="py-1.5 flex justify-between">
                                     <span class="text-gray-600">${prodName}:</span>
-                                    <span class="font-medium text-gray-900">${qty} кг</span>
+                                    <span class="font-medium text-gray-900">${need.qty} ${need.unit}</span>
                                 </li>
                             `;
                         }
@@ -218,7 +232,7 @@ def get_dashboard():
                     container.innerHTML = html;
 
                 } catch (error) {
-                    container.innerHTML = '<div class="text-center py-12 text-red-500">Ошибка при расчете. Проверьте структуру колонок в Location.xlsx.</div>';
+                    container.innerHTML = '<div class="text-center py-12 text-red-500">Ошибка при расчете. Проверьте структуру Excel файлов.</div>';
                     console.error(error);
                 }
             }
@@ -233,7 +247,7 @@ def get_dashboard():
 
 @app.get("/api/raznaryadka/{target_date}")
 def get_raznaryadka_by_date(target_date: str, region: str = "Город"):
-  """Формирует разнарядку на основе данных из Excel файлов."""
+  """Формирует разнарядку с переводом граммов в килограммы на основе Menu.xlsx."""
   try:
     parsed_date = date.fromisoformat(target_date)
   except ValueError:
@@ -256,16 +270,24 @@ def get_raznaryadka_by_date(target_date: str, region: str = "Город"):
   summary_ingredients = {}
 
   for point_id, point_info in points_dict.items():
-    children = point_info["children_count"]  # берем напрямую из Excel
+    children = point_info["children_count"]
     point_needs = {}
 
-    for prod_name, kg_per_child in ttk_items.items():
+    for prod_name, data in ttk_items.items():
+      kg_per_child = data["qty_per_child"]
+      unit = data["unit"]
+
       total_needed = kg_per_child * children
-      point_needs[prod_name] = round(total_needed, 2)
+      rounded_qty = round(total_needed, 2)
+
+      point_needs[prod_name] = {
+          "qty": rounded_qty,
+          "unit": unit,
+      }
 
       if prod_name not in summary_ingredients:
-        summary_ingredients[prod_name] = 0.0
-      summary_ingredients[prod_name] += total_needed
+        summary_ingredients[prod_name] = {"total_qty": 0.0, "unit": unit}
+      summary_ingredients[prod_name]["total_qty"] += total_needed
 
     points_report.append({
         "point_id": point_id,
@@ -275,7 +297,11 @@ def get_raznaryadka_by_date(target_date: str, region: str = "Город"):
     })
 
   summary_rounded = {
-      prod: round(qty, 2) for prod, qty in summary_ingredients.items()
+      prod: {
+          "total_qty": round(info["total_qty"], 2),
+          "unit": info["unit"],
+      }
+      for prod, info in summary_ingredients.items()
   }
 
   return {
