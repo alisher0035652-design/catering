@@ -8,6 +8,7 @@ import pandas as pd
 app = FastAPI(title="Catering Management API", version="1.0.0")
 
 SETTINGS_FILE = "calendar_settings.json"
+STOCK_FILE = "stock_settings.json"
 
 
 def load_manual_settings() -> dict:
@@ -25,11 +26,26 @@ def save_manual_settings(settings: dict):
     json.dump(settings, f, ensure_ascii=False, indent=4)
 
 
-def calculate_calendar_dynamic(start_date: date, end_date: date) -> dict:
-  """Рассчитывает календарь непрерывным потоком начиная с 1 января 2026 года,
+def load_stock_settings() -> dict:
+  """Загружает начальные остатки: { region: { point_id: { product_name: qty } }
 
-  чтобы цепочка меню не обрывалась при смене месяцев.
+  }
   """
+  if os.path.exists(STOCK_FILE):
+    try:
+      with open(STOCK_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+    except Exception:
+      return {}
+  return {}
+
+
+def save_stock_settings(settings: dict):
+  with open(STOCK_FILE, "w", encoding="utf-8") as f:
+    json.dump(settings, f, ensure_ascii=False, indent=4)
+
+
+def calculate_calendar_dynamic(start_date: date, end_date: date) -> dict:
   settings = load_manual_settings()
   manual_days = settings.get("days", {})
 
@@ -45,7 +61,6 @@ def calculate_calendar_dynamic(start_date: date, end_date: date) -> dict:
     day_conf = manual_days.get(d_str, {})
 
     is_holiday = day_conf.get("is_holiday", False)
-    # По умолчанию суббота (5) и воскресенье (6) — выходные
     if current.weekday() >= 5 and "is_holiday" not in day_conf:
       is_holiday = True
 
@@ -142,6 +157,16 @@ def load_menu_from_excel(menu_num: int) -> dict:
     return {}
 
 
+def get_all_product_names() -> list:
+  """Собирает уникальный список всех продуктов со всех листов меню."""
+  products = set()
+  for i in range(1, 11):
+    items = load_menu_from_excel(i)
+    for p in items.keys():
+      products.add(p)
+  return sorted(list(products))
+
+
 @app.get("/", response_class=HTMLResponse)
 def get_dashboard():
   html_content = """
@@ -162,7 +187,8 @@ def get_dashboard():
                 </div>
                 <div class="flex space-x-2">
                     <button onclick="switchTab('matrix')" id="btnTabMatrix" class="px-4 py-2 rounded-md text-sm font-medium bg-blue-600 text-white transition">📊 Матрица разнарядки</button>
-                    <button onclick="switchTab('calendar')" id="btnTabCalendar" class="px-4 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">📅 Интерактивный календарь меню</button>
+                    <button onclick="switchTab('calendar')" id="btnTabCalendar" class="px-4 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">📅 Календарь меню</button>
+                    <button onclick="switchTab('stock')" id="btnTabStock" class="px-4 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">📦 Начальные остатки</button>
                 </div>
             </nav>
 
@@ -190,13 +216,12 @@ def get_dashboard():
                         </div>
                     </div>
                 </header>
-
                 <div id="matrixResultContainer" class="space-y-6">
                     <div class="bg-white shadow rounded-lg p-8 text-center text-gray-400">Выберите дату и нажмите «Сформировать».</div>
                 </div>
             </div>
 
-            <!-- Вкладка 2: Интерактивный Календарь -->
+            <!-- Вкладка 2: Календарь -->
             <div id="tabCalendar" class="hidden space-y-6">
                 <header class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center">
                     <div>
@@ -209,13 +234,45 @@ def get_dashboard():
                         <button onclick="changeMonth(1)" class="bg-gray-200 px-3 py-1.5 rounded text-sm font-bold hover:bg-gray-300">Месяц ►</button>
                     </div>
                 </header>
-
                 <div class="bg-white shadow rounded-lg p-6">
                     <div class="grid grid-cols-7 gap-2 mb-3 text-center font-bold text-sm text-gray-600">
                         <div>Пн</div><div>Вт</div><div>Ср</div><div>Чт</div><div>Пт</div><div class="text-red-500">Сб</div><div class="text-red-500">Вс</div>
                     </div>
-                    <div id="calendarGrid" class="grid grid-cols-7 gap-3">
-                        <!-- Квадратики дней -->
+                    <div id="calendarGrid" class="grid grid-cols-7 gap-3"></div>
+                </div>
+            </div>
+
+            <!-- Вкладка 3: Начальные остатки -->
+            <div id="tabStock" class="hidden space-y-6">
+                <header class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center">
+                    <div>
+                        <h1 class="text-xl font-bold text-gray-800">Ввод начальных остатков на складах МТТ</h1>
+                        <p class="text-sm text-gray-500 mt-1">Укажите текущие остатки продуктов для каждой точки</p>
+                    </div>
+                    <div class="flex items-center space-x-3 mt-4 md:mt-0">
+                        <div>
+                            <label class="text-xs font-medium text-gray-600 block">Регион:</label>
+                            <select id="stockRegionSelect" onchange="loadStockForm()" class="border border-gray-300 rounded-md px-3 py-2 text-sm">
+                                <option value="Город" selected>Город</option>
+                                <option value="Район">Район</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="text-xs font-medium text-gray-600 block">Точка МТТ:</label>
+                            <select id="stockPointSelect" onchange="loadStockForm()" class="border border-gray-300 rounded-md px-3 py-2 text-sm min-w-[200px]">
+                                <!-- Заполняется через JS -->
+                            </select>
+                        </div>
+                    </div>
+                </header>
+
+                <div class="bg-white shadow rounded-lg p-6">
+                    <div class="flex justify-between items-center mb-4">
+                        <h3 class="font-bold text-gray-700">Список продуктов и остатки</h3>
+                        <button onclick="saveStockData()" class="bg-green-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-green-700 transition">💾 Сохранить остатки</button>
+                    </div>
+                    <div id="stockTableContainer" class="overflow-x-auto">
+                        <p class="text-gray-400">Выберите точку МТТ...</p>
                     </div>
                 </div>
             </div>
@@ -262,19 +319,18 @@ def get_dashboard():
             let selectedDateStr = '';
 
             function switchTab(tab) {
-                if (tab === 'matrix') {
-                    document.getElementById('tabMatrix').classList.remove('hidden');
-                    document.getElementById('tabCalendar').classList.add('hidden');
-                    document.getElementById('btnTabMatrix').className = "px-4 py-2 rounded-md text-sm font-medium bg-blue-600 text-white transition";
-                    document.getElementById('btnTabCalendar').className = "px-4 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition";
-                } else {
-                    document.getElementById('tabMatrix').classList.add('hidden');
-                    document.getElementById('tabCalendar').classList.remove('hidden');
-                    document.getElementById('btnTabCalendar').className = "px-4 py-2 rounded-md text-sm font-medium bg-blue-600 text-white transition";
-                    document.getElementById('btnTabMatrix').className = "px-4 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition";
-                    loadCalendarGrid();
-                }
+                ['matrix', 'calendar', 'stock'].forEach(t => {
+                    document.getElementById('tab' + capitalize(t)).classList.add('hidden');
+                    document.getElementById('btnTab' + capitalize(t)).className = "px-4 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition";
+                });
+                document.getElementById('tab' + capitalize(tab)).classList.remove('hidden');
+                document.getElementById('btnTab' + capitalize(tab)).className = "px-4 py-2 rounded-md text-sm font-medium bg-blue-600 text-white transition";
+
+                if (tab === 'calendar') loadCalendarGrid();
+                if (tab === 'stock') initStockTab();
             }
+
+            function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
             function changeMonth(dir) {
                 viewMonth += dir;
@@ -298,7 +354,7 @@ def get_dashboard():
                 grid.innerHTML = '';
 
                 const firstDay = new Date(viewYear, viewMonth, 1);
-                let startWeekDay = (firstDay.getDay() + 6) % 7; // Пн = 0
+                let startWeekDay = (firstDay.getDay() + 6) % 7;
 
                 for (let i = 0; i < startWeekDay; i++) {
                     grid.innerHTML += `<div class="bg-gray-50 rounded-lg min-h-[105px] opacity-30"></div>`;
@@ -328,9 +384,7 @@ def get_dashboard():
                                 ${info.forced ? '<span class="text-[10px] bg-purple-200 text-purple-800 px-1 rounded">Fix</span>' : ''}
                             </div>
                             <div class="text-center my-auto">
-                                <span class="inline-block px-2.5 py-1 rounded-md text-xs font-bold ${badgeBg}">
-                                    ${statusText}
-                                </span>
+                                <span class="inline-block px-2.5 py-1 rounded-md text-xs font-bold ${badgeBg}">${statusText}</span>
                             </div>
                         </div>
                     `;
@@ -345,23 +399,85 @@ def get_dashboard():
                 document.getElementById('dayModal').classList.remove('hidden');
             }
 
-            function closeModal() {
-                document.getElementById('dayModal').classList.add('hidden');
-            }
+            function closeModal() { document.getElementById('dayModal').classList.add('hidden'); }
 
             async function saveDaySettings() {
                 const is_holiday = document.getElementById('modalIsHoliday').value === 'true';
                 const menuVal = document.getElementById('modalMenu').value;
                 const menu = menuVal ? parseInt(menuVal) : null;
-
                 await fetch('/api/calendar/settings', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ date: selectedDateStr, is_holiday, menu })
                 });
-
                 closeModal();
                 loadCalendarGrid();
+            }
+
+            async function initStockTab() {
+                const region = document.getElementById('stockRegionSelect').value;
+                const res = await fetch(`/api/points/${region}`);
+                const points = await res.json();
+                const sel = document.getElementById('stockPointSelect');
+                sel.innerHTML = '';
+                points.forEach(p => {
+                    sel.innerHTML += `<option value="${p.id}">${p.name} (${p.children_count} дет)</option>`;
+                });
+                loadStockForm();
+            }
+
+            async function loadStockForm() {
+                const region = document.getElementById('stockRegionSelect').value;
+                const pointId = document.getElementById('stockPointSelect').value;
+                if (!pointId) return;
+
+                const res = await fetch(`/api/stock/${region}/${pointId}`);
+                const data = await res.json(); // { product_name: qty }
+
+                const container = document.getElementById('stockTableContainer');
+                let html = `<table class="min-w-full divide-y divide-gray-200 text-sm">
+                    <thead class="bg-gray-100">
+                        <tr>
+                            <th class="px-4 py-2 text-left font-bold text-gray-700">Продукт</th>
+                            <th class="px-4 py-2 text-left font-bold text-gray-700 w-48">Остаток на складе</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-gray-200 bg-white">`;
+
+                for (const [prod, qty] of Object.entries(data)) {
+                    html += `<tr>
+                        <td class="px-4 py-2 font-medium text-gray-800">${prod}</td>
+                        <td class="px-4 py-2">
+                            <input type="number" step="0.01" data-product="${prod}" value="${qty}" class="stock-input border border-gray-300 rounded px-3 py-1 text-sm w-full focus:ring-2 focus:ring-blue-500">
+                        </td>
+                    </tr>`;
+                }
+                html += `</tbody></table>`;
+                container.innerHTML = html;
+            }
+
+            async function saveStockData() {
+                const region = document.getElementById('stockRegionSelect').value;
+                const pointId = document.getElementById('stockPointSelect').value;
+                const inputs = document.querySelectorAll('.stock-input');
+                
+                const stockData = {};
+                inputs.forEach(inp => {
+                    const prod = inp.getAttribute('data-product');
+                    stockData[prod] = parseFloat(inp.value) || 0.0;
+                });
+
+                const res = await fetch(`/api/stock/${region}/${pointId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(stockData)
+                });
+
+                if (res.ok) {
+                    alert('Остатки успешно сохранены!');
+                } else {
+                    alert('Ошибка сохранения остатков.');
+                }
             }
 
             async function loadMatrixRaznaryadka() {
@@ -446,6 +562,35 @@ def get_dashboard():
   return HTMLResponse(content=html_content)
 
 
+@app.get("/api/points/{region}")
+def get_points_api(region: str):
+  p_dict = load_points_from_excel(region)
+  return [
+      {"id": pid, "name": p["name"], "children_count": p["children_count"]}
+      for pid, p in p_dict.items()
+  ]
+
+
+@app.get("/api/stock/{region}/{point_id}")
+def get_stock_api(region: str, point_id: str):
+  all_products = get_all_product_names()
+  stock_data = load_stock_settings()
+  point_stock = stock_data.get(region, {}).get(point_id, {})
+
+  result = {prod: point_stock.get(prod, 0.0) for prod in all_products}
+  return result
+
+
+@app.post("/api/stock/{region}/{point_id}")
+def save_stock_api(region: str, point_id: str, data: dict):
+  stock_data = load_stock_settings()
+  if region not in stock_data:
+    stock_data[region] = {}
+  stock_data[region][point_id] = data
+  save_stock_settings(stock_data)
+  return {"status": "success"}
+
+
 @app.get("/api/calendar/range")
 def get_calendar_range_api(start: str, end: str):
   try:
@@ -453,9 +598,7 @@ def get_calendar_range_api(start: str, end: str):
     e_date = date.fromisoformat(end)
   except ValueError:
     raise HTTPException(status_code=400, detail="Неверный формат дат")
-
-  cal_map = calculate_calendar_dynamic(s_date, e_date)
-  return cal_map
+  return calculate_calendar_dynamic(s_date, e_date)
 
 
 @app.post("/api/calendar/settings")
@@ -463,7 +606,6 @@ def save_setting_api(data: dict):
   date_str = data.get("date")
   if not date_str:
     raise HTTPException(status_code=400, detail="Дата обязательна")
-
   settings = load_manual_settings()
   settings["days"][date_str] = {
       "is_holiday": data.get("is_holiday", False),
