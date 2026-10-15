@@ -191,8 +191,8 @@ def get_dashboard():
             <div id="tabMatrix" class="space-y-6">
                 <header class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center">
                     <div>
-                        <h1 class="text-xl font-bold text-gray-800">Матричная разнарядка (Продукты × МТТ)</h1>
-                        <p class="text-sm text-gray-500 mt-1">Автоматический расчет по календарю с учетом дней отдыха</p>
+                        <h1 class="text-xl font-bold text-gray-800">Матричная разнарядка (Закупка за вычетом остатков)</h1>
+                        <p class="text-sm text-gray-500 mt-1">Автоматический расчет по календарю и остаткам на складах</p>
                     </div>
                     <div class="mt-4 md:mt-0 flex flex-wrap items-center gap-3">
                         <div>
@@ -476,7 +476,7 @@ def get_dashboard():
                 const container = document.getElementById('matrixResultContainer');
                 
                 if (!dateStr) { alert('Выберите дату'); return; }
-                container.innerHTML = '<div class="text-center py-12 text-gray-500">Формирование матрицы...</div>';
+                container.innerHTML = '<div class="text-center py-12 text-gray-500">Формирование матрицы закупки...</div>';
 
                 try {
                     const response = await fetch(`/api/raznaryadka/matrix/${dateStr}?region=${region}`);
@@ -500,7 +500,7 @@ def get_dashboard():
 
                         <div class="bg-white shadow rounded-lg overflow-hidden">
                             <div class="bg-gray-50 px-6 py-4 border-b border-gray-200">
-                                <h3 class="text-lg font-medium text-gray-900">📊 Сводная матрица закупки на неделю</h3>
+                                <h3 class="text-lg font-medium text-gray-900">📊 Чистая потребность к закупке (за вычетом остатков)</h3>
                             </div>
                             <div class="overflow-x-auto" style="max-height: 700px;">
                                 <table class="min-w-full divide-y divide-gray-200 text-xs border-collapse">
@@ -515,7 +515,7 @@ def get_dashboard():
                     });
 
                     html += `
-                                            <th class="px-4 py-3 text-center font-bold text-blue-800 bg-blue-50">ИТОГО ЗА НЕДЕЛЮ</th>
+                                            <th class="px-4 py-3 text-center font-bold text-blue-800 bg-blue-50">ИТОГО К ЗАКУПКЕ</th>
                                         </tr>
                                     </thead>
                                     <tbody class="divide-y divide-gray-200 bg-white">
@@ -529,7 +529,7 @@ def get_dashboard():
                         `;
                         data.points.forEach(point => {
                             const val = rowData.points_qty[point.id] || 0;
-                            html += `<td class="px-3 py-3 text-center border-r text-gray-700 ${val > 0 ? 'font-semibold' : 'text-gray-300'}">${val > 0 ? val : '-'}</td>`;
+                            html += `<td class="px-3 py-3 text-center border-r text-gray-700 ${val > 0 ? 'font-semibold text-blue-600' : 'text-gray-300'}">${val > 0 ? val : '-'}</td>`;
                         });
                         html += `
                                 <td class="px-4 py-3 text-center font-bold text-blue-900 bg-blue-50">${rowData.weekly_total}</td>
@@ -630,6 +630,8 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
       for pid, pinfo in points_dict.items()
   ]
 
+  stock_data = load_stock_settings().get(region, {})
+
   matrix_data = {}
   working_days_count = 0
 
@@ -655,16 +657,18 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
               "weekly_total": 0.0,
           }
         matrix_data[prod_name]["points_qty"][point_id] += needed
-        matrix_data[prod_name]["weekly_total"] += needed
 
-  for prod_name in matrix_data:
-    matrix_data[prod_name]["weekly_total"] = round(
-        matrix_data[prod_name]["weekly_total"], 2
-    )
-    for pid in matrix_data[prod_name]["points_qty"]:
-      matrix_data[prod_name]["points_qty"][pid] = round(
-          matrix_data[prod_name]["points_qty"][pid], 2
-      )
+  for prod_name, prod_info in matrix_data.items():
+    weekly_sum = 0.0
+    for pid in points_dict.keys():
+      gross_qty = prod_info["points_qty"][pid]
+      stock_qty = stock_data.get(str(pid), {}).get(prod_name, 0.0)
+
+      net_qty = max(0.0, gross_qty - stock_qty)
+      prod_info["points_qty"][pid] = round(net_qty, 2)
+      weekly_sum += net_qty
+
+    prod_info["weekly_total"] = round(weekly_sum, 2)
 
   return {
       "week_start": week_days[0].isoformat(),
