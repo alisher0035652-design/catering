@@ -157,7 +157,6 @@ def get_dashboard():
                                             <th class="px-3 py-3 text-center font-bold text-gray-700 border-r bg-gray-100 min-w-[70px]">Ед.</th>
                     `;
 
-                    // Заголовки столбцов - названия точек МТТ
                     data.points.forEach(point => {
                         html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]" title="Детей: ${point.children_count}">${point.name}<br><span class="text-[10px] text-blue-600">(${point.children_count} дет)</span></th>`;
                     });
@@ -169,22 +168,18 @@ def get_dashboard():
                                     <tbody class="divide-y divide-gray-200 bg-white">
                     `;
 
-                    // Строки матрицы по каждому продукту
                     for (const [prodName, rowData] of Object.entries(data.matrix)) {
                         html += `
-                            hover:bg-gray-50
-                            <tr>
+                            <tr class="hover:bg-gray-50">
                                 <td class="px-4 py-3 font-medium text-gray-900 border-r bg-white sticky left-0 z-10">${prodName}</td>
                                 <td class="px-3 py-3 text-center text-gray-500 border-r bg-gray-50">${rowData.unit}</td>
                         `;
 
-                        // Значения по каждой точке МТТ
                         data.points.forEach(point => {
                             const val = rowData.points_qty[point.id] || 0;
                             html += `<td class="px-3 py-3 text-center border-r text-gray-700 ${val > 0 ? 'font-semibold' : 'text-gray-300'}">${val > 0 ? val : '-'}</td>`;
                         });
 
-                        // Итоговая колонка по продукту
                         html += `
                                 <td class="px-4 py-3 text-center font-bold text-blue-900 bg-blue-50">${rowData.weekly_total}</td>
                             </tr>
@@ -216,7 +211,7 @@ def get_dashboard():
 
 @app.get("/api/raznaryadka/matrix/{target_date}")
 def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
-  """Гформирует матрицу: Продукты в строках, точки МТТ в столбцах (суммарно за
+  """Формирует матрицу: Продукты в строках, точки МТТ в столбцах (суммарно за
 
   неделю).
   """
@@ -227,13 +222,11 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
         status_code=400, detail="Неверный формат даты. Используйте ГГГГ-ММ-ДД"
     )
 
-  # Пн-Пт текущей недели
   start_of_week = parsed_date - timedelta(days=parsed_date.weekday())
   week_days = [start_of_week + timedelta(days=i) for i in range(5)]
 
   points_dict = load_points_from_excel(region)
 
-  # Подготавливаем структуру точек для ответа
   points_list = [
       {
           "id": pid,
@@ -243,8 +236,7 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
       for pid, pinfo in points_dict.items()
   ]
 
-  # Собираем данные за все рабочие дни недели
-  matrix_data = {}  # { prod_name: { unit: 'кг', points_qty: {point_id: qty}, weekly_total: 0 } }
+  matrix_data = {}
 
   for day in week_days:
     menu_num = get_menu_number_for_date(day)
@@ -271,7 +263,6 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
         matrix_data[prod_name]["points_qty"][point_id] += needed
         matrix_data[prod_name]["weekly_total"] += needed
 
-  # Округляем значения в матрице
   for prod_name in matrix_data:
     matrix_data[prod_name]["weekly_total"] = round(
         matrix_data[prod_name]["weekly_total"], 2
