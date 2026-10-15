@@ -26,16 +26,19 @@ def save_manual_settings(settings: dict):
 
 
 def calculate_calendar_dynamic(start_date: date, end_date: date) -> dict:
-  """Динамически рассчитывает календарь от start_date до end_date с учетом ручных
+  """Рассчитывает календарь непрерывным потоком начиная с 1 января 2026 года,
 
-  правок. Цепочка меню идет от 1 до 10 циклично, пропуская дни отдыха/выходные.
+  чтобы цепочка меню не обрывалась при смене месяцев.
   """
   settings = load_manual_settings()
   manual_days = settings.get("days", {})
 
+  global_start = date(2026, 1, 1)
+  calc_start = min(global_start, start_date)
+
   current_menu = 1
   calendar_map = {}
-  current = start_date
+  current = calc_start
 
   while current <= end_date:
     d_str = current.isoformat()
@@ -49,29 +52,31 @@ def calculate_calendar_dynamic(start_date: date, end_date: date) -> dict:
     forced_menu = day_conf.get("menu", None)
 
     if is_holiday:
-      calendar_map[d_str] = {
-          "date": d_str,
-          "is_holiday": True,
-          "menu": None,
-          "forced": False,
-      }
+      if current >= start_date:
+        calendar_map[d_str] = {
+            "date": d_str,
+            "is_holiday": True,
+            "menu": None,
+            "forced": False,
+        }
     else:
       if forced_menu is not None:
         current_menu = int(forced_menu)
-        calendar_map[d_str] = {
-            "date": d_str,
-            "is_holiday": False,
-            "menu": current_menu,
-            "forced": True,
-        }
+        if current >= start_date:
+          calendar_map[d_str] = {
+              "date": d_str,
+              "is_holiday": False,
+              "menu": current_menu,
+              "forced": True,
+          }
       else:
-        calendar_map[d_str] = {
-            "date": d_str,
-            "is_holiday": False,
-            "menu": current_menu,
-            "forced": False,
-        }
-      # Переходим к следующему меню (1-10)
+        if current >= start_date:
+          calendar_map[d_str] = {
+              "date": d_str,
+              "is_holiday": False,
+              "menu": current_menu,
+              "forced": False,
+          }
       current_menu = (current_menu % 10) + 1
 
     current += timedelta(days=1)
