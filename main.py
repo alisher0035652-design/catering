@@ -8,11 +8,10 @@ app = FastAPI(title="Catering Management API", version="1.0.0")
 
 
 def load_points_from_excel(region: str = "Город") -> dict:
-  """Загружает список точек (МТТ) из файла Location.xlsx.
+  """Загружает список точек (МТТ) и точное количество детей из файла
 
-  region: 'Город' (активные сейчас, 21 точка) или 'Район' (планируемые, ~34
-  точки). Для примера зададим среднее количество детей (например, 200 на точку,
-  позже заменим на реальные данные).
+  Location.xlsx. Колонка 0: Название МТТ Колонка 1: Количество детей (берется
+  напрямую из Excel, без добавок)
   """
   try:
     df = pd.read_excel("Location.xlsx", sheet_name=region, header=None)
@@ -20,8 +19,18 @@ def load_points_from_excel(region: str = "Город") -> dict:
     for idx, row in df.iterrows():
       mtt_name = str(row.iloc[0]).strip()
       if mtt_name and mtt_name != "nan":
-        # Условное количество детей по умолчанию (можно будет вынести во второй столбец Location.xlsx)
-        points[idx + 1] = {"name": mtt_name, "children_count": 200}
+        # Считываем детей из второй колонки (индекс 1). Если пусто или NaN, ставим 0.
+        children = 0
+        if len(row) > 1 and pd.notna(row.iloc[1]):
+          try:
+            children = int(float(row.iloc[1]))
+          except ValueError:
+            children = 0
+
+        points[idx + 1] = {
+            "name": mtt_name,
+            "children_count": children,
+        }
     return points
   except Exception as e:
     print(f"Ошибка чтения точек из Location.xlsx ({region}): {e}")
@@ -61,7 +70,7 @@ def get_dashboard():
             <header class="bg-white shadow rounded-lg p-6 mb-8 flex flex-col md:flex-row justify-between items-center">
                 <div>
                     <h1 class="text-2xl font-bold text-blue-600">🍽 Управление Разнарядкой Кетеринга</h1>
-                    <p class="text-sm text-gray-500 mt-1">Меню (Menu.xlsx) + Точки МТТ (Location.xlsx)</p>
+                    <p class="text-sm text-gray-500 mt-1">Данные точек и детей берутся напрямую из Location.xlsx</p>
                 </div>
                 <div class="mt-4 md:mt-0 flex flex-wrap items-center gap-3">
                     <div>
@@ -132,8 +141,8 @@ def get_dashboard():
                                 <p class="text-xl font-bold text-gray-800 mt-1">Меню № ${data.menu_number}</p>
                             </div>
                             <div class="bg-white shadow rounded-lg p-6 border-t-4 border-orange-500">
-                                <h3 class="text-sm font-medium text-gray-500">Кол-во точек МТТ</h3>
-                                <p class="text-xl font-bold text-orange-600 mt-1">${data.points_count} объектов</p>
+                                <h3 class="text-sm font-medium text-gray-500">Объектов МТТ</h3>
+                                <p class="text-xl font-bold text-orange-600 mt-1">${data.points_count} точек</p>
                             </div>
                         </div>
 
@@ -209,7 +218,7 @@ def get_dashboard():
                     container.innerHTML = html;
 
                 } catch (error) {
-                    container.innerHTML = '<div class="text-center py-12 text-red-500">Ошибка при расчете. Проверьте структуру Excel файлов.</div>';
+                    container.innerHTML = '<div class="text-center py-12 text-red-500">Ошибка при расчете. Проверьте структуру колонок в Location.xlsx.</div>';
                     console.error(error);
                 }
             }
@@ -224,10 +233,7 @@ def get_dashboard():
 
 @app.get("/api/raznaryadka/{target_date}")
 def get_raznaryadka_by_date(target_date: str, region: str = "Город"):
-  """Формирует разнарядку, считывая точки из Location.xlsx (Город или Район)
-
-  и техкарты из Menu.xlsx.
-  """
+  """Формирует разнарядку на основе данных из Excel файлов."""
   try:
     parsed_date = date.fromisoformat(target_date)
   except ValueError:
@@ -243,7 +249,6 @@ def get_raznaryadka_by_date(target_date: str, region: str = "Город"):
         "message": "В этот день выходной или праздник. Разнарядка не нужна.",
     }
 
-  # Загружаем точки из выбранного листа Location.xlsx ('Город' или 'Район')
   points_dict = load_points_from_excel(region)
   ttk_items = load_menu_from_excel(menu_num)
 
@@ -251,7 +256,7 @@ def get_raznaryadka_by_date(target_date: str, region: str = "Город"):
   summary_ingredients = {}
 
   for point_id, point_info in points_dict.items():
-    children = point_info["children_count"]
+    children = point_info["children_count"]  # берем напрямую из Excel
     point_needs = {}
 
     for prod_name, kg_per_child in ttk_items.items():
