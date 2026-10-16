@@ -1,9 +1,10 @@
 from datetime import date, timedelta
+import io
 import json
 import os
 import re
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 import pandas as pd
 import psycopg2
 import psycopg2.extras
@@ -12,6 +13,7 @@ app = FastAPI(title="Catering Management API", version="1.0.0")
 
 SETTINGS_FILE = "calendar_settings.json"
 STOCK_FILE = "stock_settings.json"
+FACT_CHILDREN_FILE = "fact_children_settings.json"
 
 
 def get_db_connection():
@@ -61,11 +63,22 @@ def save_stock_settings(settings: dict):
     json.dump(settings, f, ensure_ascii=False, indent=4)
 
 
-def load_purchases_settings() -> dict:
-  """Автоматически подтягивает отгрузки организации 'MUXSIN-FAYZ' из базы данных
+def load_fact_children_settings() -> dict:
+  if os.path.exists(FACT_CHILDREN_FILE):
+    try:
+      with open(FACT_CHILDREN_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+    except Exception:
+      return {}
+  return {}
 
-  и сопоставляет их с точками МТТ строго по числовому номеру из Location.xlsx.
-  """
+
+def save_fact_children_settings(settings: dict):
+  with open(FACT_CHILDREN_FILE, "w", encoding="utf-8") as f:
+    json.dump(settings, f, ensure_ascii=False, indent=4)
+
+
+def load_purchases_settings() -> dict:
   purchases_by_region = {"Город": {}, "Район": {}}
   try:
     conn = get_db_connection()
@@ -258,24 +271,26 @@ def get_dashboard():
                     <span class="text-xs bg-blue-100 text-blue-800 px-2.5 py-1 rounded-full font-medium">Интегрировано с MUXSIN-FAYZ</span>
                 </div>
                 <div class="flex space-x-2">
-                    <button onclick="switchTab('matrix')" id="btnTabMatrix" class="px-4 py-2 rounded-md text-sm font-medium bg-blue-600 text-white transition">📊 Матрица разнарядки</button>
+                    <button onclick="switchTab('matrix')" id="btnTabMatrix" class="px-4 py-2 rounded-md text-sm font-medium bg-blue-600 text-white transition">📊 Матрица закупки (План)</button>
+                    <button onclick="switchTab('fact')" id="btnTabFact" class="px-4 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">📋 Ежедневный факт расхода</button>
                     <button onclick="switchTab('calendar')" id="btnTabCalendar" class="px-4 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">📅 Календарь меню</button>
                     <button onclick="switchTab('stock')" id="btnTabStock" class="px-4 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">📦 Инвентаризация</button>
                 </div>
             </nav>
 
+            <!-- Вкладка Плановой Матрицы -->
             <div id="tabMatrix" class="space-y-6">
                 <header class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center">
                     <div>
-                        <h1 class="text-xl font-bold text-gray-800">Матричная разнарядка (Чистая потребность)</h1>
-                        <p class="text-sm text-gray-500 mt-1">Автоматический учет инвентаризации, приходов от MUXSIN-FAYZ и расхода</p>
+                        <h1 class="text-xl font-bold text-gray-800">Матричная разнарядка (Плановая потребность)</h1>
+                        <p class="text-sm text-gray-500 mt-1">Расчет на основе планового количества детей в Location.xlsx</p>
                     </div>
                     <div class="mt-4 md:mt-0 flex flex-wrap items-center gap-3">
                         <div>
                             <label class="text-xs font-medium text-gray-600 block">Регион:</label>
                             <select id="regionSelect" class="border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500">
-                                <option value="Город" selected>Город (Текущие)</option>
-                                <option value="Район">Район (Тендер / Будущие)</option>
+                                <option value="Город" selected>Город</option>
+                                <option value="Район">Район</option>
                             </select>
                         </div>
                         <div>
@@ -283,15 +298,47 @@ def get_dashboard():
                             <input type="date" id="targetDate" class="border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500">
                         </div>
                         <div class="self-end">
-                            <button onclick="loadMatrixRaznaryadka()" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 transition">Сформировать</button>
+                            <button onclick="loadMatrixRaznaryadka()" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 transition">Сформировать план</button>
                         </div>
                     </div>
                 </header>
                 <div id="matrixResultContainer" class="space-y-6">
-                    <div class="bg-white shadow rounded-lg p-8 text-center text-gray-400">Выберите дату и нажмите «Сформировать».</div>
+                    <div class="bg-white shadow rounded-lg p-8 text-center text-gray-400">Выберите дату и нажмите «Сформировать план».</div>
                 </div>
             </div>
 
+            <!-- Вкладка ФАКТИЧЕСКОГО расхода -->
+            <div id="tabFact" class="hidden space-y-6">
+                <header class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center">
+                    <div>
+                        <h1 class="text-xl font-bold text-gray-800">📋 Фактический отчет расхода продуктов</h1>
+                        <p class="text-sm text-gray-500 mt-1">Внесите фактическое количество присутствующих детей с утра (данные надежно сохраняются)</p>
+                    </div>
+                    <div class="mt-4 md:mt-0 flex flex-wrap items-center gap-3">
+                        <div>
+                            <label class="text-xs font-medium text-gray-600 block">Регион:</label>
+                            <select id="factRegionSelect" onchange="loadFactData()" class="border border-gray-300 rounded-md px-3 py-2 text-sm">
+                                <option value="Город" selected>Город</option>
+                                <option value="Район">Район</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="text-xs font-medium text-gray-600 block">Дата отчета:</label>
+                            <input type="date" id="factDate" onchange="loadFactData()" class="border border-gray-300 rounded-md px-3 py-2 text-sm">
+                        </div>
+                        <div class="self-end flex gap-2">
+                            <button onclick="saveFactChildren()" class="bg-green-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-green-700 transition">💾 Сохранить факт</button>
+                            <button onclick="downloadFactExcel()" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 transition">📥 Скачать в Excel</button>
+                        </div>
+                    </div>
+                </header>
+
+                <div id="factContainer" class="space-y-6">
+                    <p class="p-8 text-center text-gray-400 bg-white shadow rounded-lg">Загрузка данных...</p>
+                </div>
+            </div>
+
+            <!-- Календарь -->
             <div id="tabCalendar" class="hidden space-y-6">
                 <header class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center">
                     <div>
@@ -312,6 +359,7 @@ def get_dashboard():
                 </div>
             </div>
 
+            <!-- Инвентаризация -->
             <div id="tabStock" class="hidden space-y-6">
                 <header class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center">
                     <div>
@@ -343,39 +391,16 @@ def get_dashboard():
             </div>
         </div>
 
-        <div id="dayModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-            <div class="bg-white rounded-lg p-6 w-96 shadow-xl space-y-4">
-                <h3 id="modalDateTitle" class="font-bold text-lg text-gray-800">Настройка дня</h3>
-                <div>
-                    <label class="block text-xs font-medium text-gray-700 mb-1">Статус дня:</label>
-                    <select id="modalIsHoliday" class="w-full border rounded px-3 py-2 text-sm">
-                        <option value="false">Рабочий день</option>
-                        <option value="true">День отдыха / Выходной (Красный)</option>
-                    </select>
-                </div>
-                <div>
-                    <label class="block text-xs font-medium text-gray-700 mb-1">Принудительное меню:</label>
-                    <select id="modalMenu" class="w-full border rounded px-3 py-2 text-sm">
-                        <option value="">Автоматически по цепочке</option>
-                        <option value="1">Меню № 1</option><option value="2">Меню № 2</option><option value="3">Меню № 3</option><option value="4">Меню № 4</option><option value="5">Меню № 5</option><option value="6">Меню № 6</option><option value="7">Меню № 7</option><option value="8">Меню № 8</option><option value="9">Меню № 9</option><option value="10">Меню № 10</option>
-                    </select>
-                </div>
-                <div class="flex justify-end space-x-2 pt-2">
-                    <button onclick="closeModal()" class="bg-gray-200 px-4 py-2 rounded text-sm font-medium">Отмена</button>
-                    <button onclick="saveDaySettings()" class="bg-blue-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-blue-700">Сохранить</button>
-                </div>
-            </div>
-        </div>
-
         <script>
             document.getElementById('targetDate').valueAsDate = new Date();
             document.getElementById('stockDate').valueAsDate = new Date();
+            document.getElementById('factDate').valueAsDate = new Date();
+
             let viewYear = new Date().getFullYear();
             let viewMonth = new Date().getMonth();
-            let selectedDateStr = '';
 
             function switchTab(tab) {
-                ['matrix', 'calendar', 'stock'].forEach(t => {
+                ['matrix', 'fact', 'calendar', 'stock'].forEach(t => {
                     document.getElementById('tab' + capitalize(t)).classList.add('hidden');
                     document.getElementById('btnTab' + capitalize(t)).className = "px-4 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition";
                 });
@@ -383,81 +408,112 @@ def get_dashboard():
                 document.getElementById('btnTab' + capitalize(tab)).className = "px-4 py-2 rounded-md text-sm font-medium bg-blue-600 text-white transition";
                 if (tab === 'calendar') loadCalendarGrid();
                 if (tab === 'stock') loadStockMatrix();
+                if (tab === 'fact') loadFactData();
             }
 
             function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
-            function changeMonth(dir) {
-                viewMonth += dir;
-                if (viewMonth > 11) { viewMonth = 0; viewYear++; }
-                if (viewMonth < 0) { viewMonth = 11; viewYear--; }
-                loadCalendarGrid();
-            }
+            async function loadFactData() {
+                const dateVal = document.getElementById('factDate').value;
+                const region = document.getElementById('factRegionSelect').value;
+                const container = document.getElementById('factContainer');
+                container.innerHTML = '<div class="text-center py-12 text-gray-500 bg-white rounded-lg shadow">Загрузка сохраненных данных факта...</div>';
 
-            async function loadCalendarGrid() {
-                const monthNames = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
-                document.getElementById('currentMonthLabel').innerText = `${monthNames[viewMonth]} ${viewYear}`;
-                const lastDay = new Date(viewYear, viewMonth + 1, 0);
-                const startStr = `${viewYear}-${String(viewMonth + 1).padStart(2, '0')}-01`;
-                const endStr = `${viewYear}-${String(viewMonth + 1).padStart(2, '0')}-${String(lastDay.getDate()).padStart(2, '0')}`;
+                const res = await fetch(`/api/fact/report?date=${dateVal}&region=${region}`);
+                const data = await res.json();
 
-                const response = await fetch(`/api/calendar/range?start=${startStr}&end=${endStr}`);
-                const data = await response.json();
-                const grid = document.getElementById('calendarGrid');
-                grid.innerHTML = '';
+                let html = `
+                    <div class="bg-white shadow rounded-lg p-6 border-l-4 border-green-500">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="font-bold text-gray-800 text-lg">👶 Фактическое присутствие детей на ${data.date}</h3>
+                            <span class="text-xs bg-purple-100 text-purple-800 font-bold px-3 py-1 rounded-full">${data.menu_num ? 'Меню № ' + data.menu_num : 'Выходной / Нет меню'}</span>
+                        </div>
+                        <div class="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-3">
+                `;
 
-                const firstDay = new Date(viewYear, viewMonth, 1);
-                let startWeekDay = (firstDay.getDay() + 6) % 7;
-                for (let i = 0; i < startWeekDay; i++) {
-                    grid.innerHTML += `<div class="bg-gray-50 rounded-lg min-h-[105px] opacity-30"></div>`;
-                }
-
-                for (let d = 1; d <= lastDay.getDate(); d++) {
-                    const dStr = `${viewYear}-${String(viewMonth + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-                    const info = data[dStr] || { is_holiday: false, menu: 1, forced: false };
-                    let bgClass = "bg-white border-gray-200 hover:border-blue-400";
-                    let badgeBg = "bg-blue-100 text-blue-800";
-                    let statusText = `Меню № ${info.menu}`;
-
-                    if (info.is_holiday) {
-                        bgClass = "bg-red-50 border-red-300 hover:border-red-500";
-                        badgeBg = "bg-red-200 text-red-900";
-                        statusText = "День отдыха";
-                    } else if (info.forced) {
-                        badgeBg = "bg-purple-100 text-purple-800";
-                        statusText += " (Руч.)";
-                    }
-
-                    grid.innerHTML += `
-                        <div onclick="openDayModal('${dStr}', ${info.is_holiday}, ${info.menu !== null ? info.menu : 'null'})" class="border ${bgClass} rounded-lg p-3 min-h-[105px] flex flex-col justify-between cursor-pointer shadow-sm transition">
-                            <div class="flex justify-between items-center"><span class="font-bold text-sm text-gray-700">${d}</span></div>
-                            <div class="text-center my-auto"><span class="inline-block px-2.5 py-1 rounded-md text-xs font-bold ${badgeBg}">${statusText}</span></div>
+                data.points.forEach(p => {
+                    const childVal = data.fact_children[p.id] !== undefined ? data.fact_children[p.id] : p.default_children;
+                    html += `
+                        <div class="bg-gray-50 p-2.5 border rounded-md text-center">
+                            <div class="text-xs font-bold text-gray-700 truncate" title="${p.name}">${p.name}</div>
+                            <div class="text-[10px] text-gray-400 mb-1">(План: ${p.default_children})</div>
+                            <input type="number" data-point-fact="${p.id}" value="${childVal}" class="fact-child-cell border border-gray-300 rounded px-2 py-1 text-center text-sm w-full font-bold text-green-700 focus:ring-2 focus:ring-green-500">
                         </div>
                     `;
+                });
+
+                html += `</div></div>`;
+
+                if (!data.menu_num) {
+                    html += `<div class="bg-white p-8 text-center text-red-500 font-bold rounded-lg shadow">В этот день по календарю выходной — списание не производится.</div>`;
+                    container.innerHTML = html;
+                    return;
                 }
+
+                html += `
+                    <div class="bg-white shadow rounded-lg overflow-hidden">
+                        <div class="bg-gray-50 px-6 py-4 border-b border-gray-200">
+                            <h3 class="text-lg font-bold text-gray-800">📦 Фактический расход продуктов за ${data.date}</h3>
+                        </div>
+                        <div class="overflow-x-auto" style="max-height: 600px;">
+                            <table class="min-w-full divide-y divide-gray-200 text-xs border-collapse">
+                                <thead class="bg-gray-100 sticky top-0 z-10">
+                                    <tr>
+                                        <th class="px-4 py-3 text-left font-bold text-gray-700 border-r bg-gray-100 sticky left-0 z-20 min-w-[180px]">Продукт</th>
+                                        <th class="px-3 py-3 text-center font-bold text-gray-700 border-r bg-gray-100 min-w-[70px]">Ед.</th>
+                `;
+
+                data.points.forEach(p => {
+                    const childVal = data.fact_children[p.id] !== undefined ? data.fact_children[p.id] : p.default_children;
+                    html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]">${p.name}<br><span class="text-[10px] text-green-600">(${childVal} факт)</span></th>`;
+                });
+
+                html += `<th class="px-4 py-3 text-center font-bold text-green-800 bg-green-50">ИТОГО ФАКТ</th></tr></thead><tbody class="divide-y divide-gray-200 bg-white">`;
+
+                for (const [prodName, rowData] of Object.entries(data.fact_consumption)) {
+                    html += `
+                        <tr class="hover:bg-gray-50">
+                            <td class="px-4 py-3 font-medium text-gray-900 border-r bg-white sticky left-0 z-10">${prodName}</td>
+                            <td class="px-3 py-3 text-center text-gray-500 border-r bg-gray-50">${rowData.unit}</td>
+                    `;
+                    data.points.forEach(p => {
+                        const val = rowData.points_qty[p.id] || 0;
+                        html += `<td class="px-3 py-3 text-center border-r text-gray-700 ${val > 0 ? 'font-semibold text-green-700' : 'text-gray-300'}">${val > 0 ? val : '-'}</td>`;
+                    });
+                    html += `<td class="px-4 py-3 text-center font-bold text-green-900 bg-green-50">${rowData.total_fact}</td></tr>`;
+                }
+
+                html += `</tbody></table></div></div>`;
+                container.innerHTML = html;
             }
 
-            function openDayModal(dateStr, isHoliday, menuNum) {
-                selectedDateStr = dateStr;
-                document.getElementById('modalDateTitle').innerText = `Настройка дня: ${dateStr}`;
-                document.getElementById('modalIsHoliday').value = isHoliday ? "true" : "false";
-                document.getElementById('modalMenu').value = (menuNum !== 'null' && menuNum !== null) ? menuNum : "";
-                document.getElementById('dayModal').classList.remove('hidden');
-            }
+            async function saveFactChildren() {
+                const dateVal = document.getElementById('factDate').value;
+                const region = document.getElementById('factRegionSelect').value;
+                const cells = document.querySelectorAll('.fact-child-cell');
+                const payload = {};
+                cells.forEach(cell => {
+                    const pid = cell.getAttribute('data-point-fact');
+                    const val = parseInt(cell.value) || 0;
+                    payload[pid] = val;
+                });
 
-            function closeModal() { document.getElementById('dayModal').classList.add('hidden'); }
-
-            async function saveDaySettings() {
-                const is_holiday = document.getElementById('modalIsHoliday').value === 'true';
-                const menuVal = document.getElementById('modalMenu').value;
-                const menu = menuVal ? parseInt(menuVal) : null;
-                await fetch('/api/calendar/settings', {
+                const res = await fetch(`/api/fact/children?date=${dateVal}&region=${region}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ date: selectedDateStr, is_holiday, menu })
+                    body: JSON.stringify(payload)
                 });
-                closeModal();
-                loadCalendarGrid();
+
+                if (res.ok) {
+                    alert('Фактическое присутствие детей успешно сохранено в базе!');
+                    loadFactData();
+                } else alert('Ошибка сохранения.');
+            }
+
+            function downloadFactExcel() {
+                const dateVal = document.getElementById('factDate').value;
+                const region = document.getElementById('factRegionSelect').value;
+                window.location.href = `/api/fact/export/excel?date=${dateVal}&region=${region}`;
             }
 
             async function loadStockMatrix() {
@@ -527,7 +583,7 @@ def get_dashboard():
                 const region = document.getElementById('regionSelect').value;
                 const container = document.getElementById('matrixResultContainer');
                 if (!dateStr) { alert('Выберите дату'); return; }
-                container.innerHTML = '<div class="text-center py-12 text-gray-500">Формирование точной закупки (с учетом MUXSIN-FAYZ)...</div>';
+                container.innerHTML = '<div class="text-center py-12 text-gray-500">Формирование плановой закупки...</div>';
 
                 try {
                     const response = await fetch(`/api/raznaryadka/matrix/${dateStr}?region=${region}`);
@@ -550,7 +606,7 @@ def get_dashboard():
 
                         <div class="bg-white shadow rounded-lg overflow-hidden">
                             <div class="bg-gray-50 px-6 py-4 border-b border-gray-200">
-                                <h3 class="text-lg font-medium text-gray-900">📊 Чистая потребность к закупке</h3>
+                                <h3 class="text-lg font-medium text-gray-900">📊 Плановая потребность к закупке (Нетто)</h3>
                             </div>
                             <div class="overflow-x-auto" style="max-height: 700px;">
                                 <table class="min-w-full divide-y divide-gray-200 text-xs border-collapse">
@@ -591,6 +647,127 @@ def get_dashboard():
   return HTMLResponse(content=html_content)
 
 
+@app.get("/api/fact/report")
+def get_fact_report(date: str, region: str = "Город"):
+  try:
+    parsed_date = date.fromisoformat(date)
+  except Exception:
+    parsed_date = date.today()
+
+  points_dict = load_points_from_excel(region)
+  points_list = [
+      {
+          "id": pid,
+          "name": pinfo["name"],
+          "default_children": pinfo["children_count"],
+      }
+      for pid, pinfo in points_dict.items()
+  ]
+
+  fact_storage = load_fact_children_settings()
+  saved_fact_children = fact_storage.get(date, {}).get(region, {})
+
+  menu_num = get_menu_number_for_date_custom(parsed_date)
+  fact_consumption = {}
+
+  if menu_num is not None:
+    menu_items = load_menu_from_excel(menu_num)
+    for prod_name, pdata in menu_items.items():
+      kg_per_child = pdata.get("qty_per_child", 0.0)
+      unit = pdata.get("unit", "кг")
+
+      points_qty = {}
+      row_sum = 0.0
+      for pid, pinfo in points_dict.items():
+        child_cnt = saved_fact_children.get(str(pid))
+        if child_cnt is None:
+          child_cnt = pinfo["children_count"]
+        else:
+          child_cnt = int(child_cnt)
+
+        qty = round(child_cnt * kg_per_child, 2)
+        points_qty[pid] = qty
+        row_sum += qty
+
+      fact_consumption[prod_name] = {
+          "unit": unit,
+          "points_qty": points_qty,
+          "total_fact": round(row_sum, 2),
+      }
+
+  return {
+      "date": date,
+      "region": region,
+      "menu_num": menu_num,
+      "points": points_list,
+      "fact_children": saved_fact_children,
+      "fact_consumption": fact_consumption,
+  }
+
+
+@app.post("/api/fact/children")
+def save_fact_children_api(data: dict, date: str, region: str = "Город"):
+  storage = load_fact_children_settings()
+  if date not in storage:
+    storage[date] = {}
+  storage[date][region] = data
+  save_fact_children_settings(storage)
+  return {"status": "success"}
+
+
+@app.get("/api/fact/export/excel")
+def export_fact_excel(date: str, region: str = "Город"):
+  try:
+    parsed_date = date.fromisoformat(date)
+  except Exception:
+    parsed_date = date.today()
+
+  points_dict = load_points_from_excel(region)
+  fact_storage = load_fact_children_settings()
+  saved_fact_children = fact_storage.get(date, {}).get(region, {})
+  menu_num = get_menu_number_for_date_custom(parsed_date)
+
+  rows_data = []
+  if menu_num is not None:
+    menu_items = load_menu_from_excel(menu_num)
+    for prod_name, pdata in menu_items.items():
+      kg_per_child = pdata.get("qty_per_child", 0.0)
+      unit = pdata.get("unit", "кг")
+
+      row = {"Продукт": prod_name, "Ед. изм.": unit}
+      total_prod = 0.0
+      for pid, pinfo in points_dict.items():
+        child_cnt = saved_fact_children.get(
+            str(pid), saved_fact_children.get(pid, pinfo["children_count"])
+        )
+        q = round(int(child_cnt) * kg_per_child, 2)
+        row[pinfo["name"]] = q
+        total_prod += q
+      row["ИТОГО ФАКТ"] = round(total_prod, 2)
+      rows_data.append(row)
+
+  df = pd.DataFrame(rows_data)
+  if df.empty:
+    df = pd.DataFrame(columns=["Продукт", "Ед. изм.", "ИТОГО ФАКТ"])
+
+  output = io.BytesIO()
+  with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    df.to_excel(writer, index=False, sheet_name=f"Факт_{date}")
+  output.seek(0)
+
+  return StreamingResponse(
+      output,
+      media_type=(
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      ),
+      headers={
+          "Content-Disposition": (
+              f"attachment; filename=Fact_Consumption_{region}_{date}.xlsx"
+          )
+      },
+  )
+
+
 @app.get("/api/stock/matrix/{region}")
 def get_stock_matrix_api(region: str, date: str = None):
   points_dict = load_points_from_excel(region)
@@ -604,13 +781,7 @@ def get_stock_matrix_api(region: str, date: str = None):
   ]
   all_products = get_all_products_with_units()
   stock_storage = load_stock_settings()
-  target_inv_date = (
-      date
-      if date
-      else str(date.today())
-      if "date" in globals()
-      else "2026-10-01"
-  )
+  target_inv_date = date if date else str(date.today())
   region_stock = stock_storage.get(target_inv_date, {}).get(region, {})
 
   products_matrix = {}
