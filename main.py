@@ -576,48 +576,103 @@ def get_dashboard():
 
                     if (!data.menu_num) {
                         html += `<div class="bg-white p-8 text-center text-red-500 font-bold rounded-lg shadow">В этот день по календарю выходной — списание не производится.</div>`;
-                        container.innerHTML = html;
-                        return;
+                    } else {
+                        html += `
+                            <div class="bg-white shadow rounded-lg overflow-hidden mb-6">
+                                <div class="bg-gray-50 px-6 py-4 border-b border-gray-200">
+                                    <h3 class="text-lg font-bold text-gray-800">📦 Фактический расход продуктов за ${data.date}</h3>
+                                </div>
+                                <div class="overflow-x-auto" style="max-height: 500px;">
+                                    <table class="min-w-full divide-y divide-gray-200 text-xs border-collapse">
+                                        <thead class="bg-gray-100 sticky top-0 z-10">
+                                            <tr>
+                                                <th class="px-4 py-3 text-left font-bold text-gray-700 border-r bg-gray-100 sticky left-0 z-20 min-w-[180px]">Продукт</th>
+                                                <th class="px-3 py-3 text-center font-bold text-gray-700 border-r bg-gray-100 min-w-[70px]">Ед.</th>
+                        `;
+
+                        data.points.forEach(p => {
+                            const childVal = data.fact_children[p.id] !== undefined ? data.fact_children[p.id] : p.default_children;
+                            html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]">${p.name}<br><span class="text-[10px] text-green-600">(${childVal} факт)</span></th>`;
+                        });
+
+                        html += `<th class="px-4 py-3 text-center font-bold text-green-800 bg-green-50">ИТОГО ФАКТ</th></tr></thead><tbody class="divide-y divide-gray-200 bg-white">`;
+
+                        for (const [prodName, rowData] of Object.entries(data.fact_consumption)) {
+                            html += `
+                                <tr class="hover:bg-gray-50">
+                                    <td class="px-4 py-3 font-medium text-gray-900 border-r bg-white sticky left-0 z-10">${prodName}</td>
+                                    <td class="px-3 py-3 text-center text-gray-500 border-r bg-gray-50">${rowData.unit}</td>
+                            `;
+                            data.points.forEach(p => {
+                                const val = rowData.points_qty[p.id] || 0;
+                                html += `<td class="px-3 py-3 text-center border-r text-gray-700 ${val > 0 ? 'font-semibold text-green-700' : 'text-gray-300'}">${val > 0 ? val : '-'}</td>`;
+                            });
+                            html += `<td class="px-4 py-3 text-center font-bold text-green-900 bg-green-50">${rowData.total_fact}</td></tr>`;
+                        }
+
+                        html += `</tbody></table></div></div>`;
                     }
 
+                    // Блок снизу: Список сохраненных дней с возможностью редактирования
                     html += `
-                        <div class="bg-white shadow rounded-lg overflow-hidden">
-                            <div class="bg-gray-50 px-6 py-4 border-b border-gray-200">
-                                <h3 class="text-lg font-bold text-gray-800">📦 Фактический расход продуктов за ${data.date}</h3>
-                            </div>
-                            <div class="overflow-x-auto" style="max-height: 600px;">
-                                <table class="min-w-full divide-y divide-gray-200 text-xs border-collapse">
-                                    <thead class="bg-gray-100 sticky top-0 z-10">
+                        <div class="bg-white shadow rounded-lg p-6">
+                            <h3 class="text-lg font-bold text-gray-800 mb-4">📅 История сохраненных дней по фактическому вводу (${region})</h3>
+                            <div class="overflow-x-auto">
+                                <table class="min-w-full divide-y divide-gray-200 text-sm">
+                                    <thead class="bg-gray-100">
                                         <tr>
-                                            <th class="px-4 py-3 text-left font-bold text-gray-700 border-r bg-gray-100 sticky left-0 z-20 min-w-[180px]">Продукт</th>
-                                            <th class="px-3 py-3 text-center font-bold text-gray-700 border-r bg-gray-100 min-w-[70px]">Ед.</th>
+                                            <th class="px-4 py-2 text-left font-bold text-gray-700">Дата</th>
+                                            <th class="px-4 py-2 text-center font-bold text-gray-700">Регион</th>
+                                            <th class="px-4 py-2 text-center font-bold text-gray-700">Статус</th>
+                                            <th class="px-4 py-2 text-right font-bold text-gray-700">Действие</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="savedDaysTableBody" class="divide-y divide-gray-200">
+                                        <tr><td colspan="4" class="text-center py-4 text-gray-400">Загрузка сохраненных дней...</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
                     `;
 
-                    data.points.forEach(p => {
-                        const childVal = data.fact_children[p.id] !== undefined ? data.fact_children[p.id] : p.default_children;
-                        html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]">${p.name}<br><span class="text-[10px] text-green-600">(${childVal} факт)</span></th>`;
-                    });
-
-                    html += `<th class="px-4 py-3 text-center font-bold text-green-800 bg-green-50">ИТОГО ФАКТ</th></tr></thead><tbody class="divide-y divide-gray-200 bg-white">`;
-
-                    for (const [prodName, rowData] of Object.entries(data.fact_consumption)) {
-                        html += `
-                            <tr class="hover:bg-gray-50">
-                                <td class="px-4 py-3 font-medium text-gray-900 border-r bg-white sticky left-0 z-10">${prodName}</td>
-                                <td class="px-3 py-3 text-center text-gray-500 border-r bg-gray-50">${rowData.unit}</td>
-                        `;
-                        data.points.forEach(p => {
-                            const val = rowData.points_qty[p.id] || 0;
-                            html += `<td class="px-3 py-3 text-center border-r text-gray-700 ${val > 0 ? 'font-semibold text-green-700' : 'text-gray-300'}">${val > 0 ? val : '-'}</td>`;
-                        });
-                        html += `<td class="px-4 py-3 text-center font-bold text-green-900 bg-green-50">${rowData.total_fact}</td></tr>`;
-                    }
-
-                    html += `</tbody></table></div></div>`;
                     container.innerHTML = html;
+                    loadSavedDaysList(region);
                 } catch (err) {
                     container.innerHTML = '<div class="text-center py-12 text-red-500 bg-white rounded-lg shadow">Ошибка загрузки данных факта.</div>';
                 }
+            }
+
+            async function loadSavedDaysList(region) {
+                const res = await fetch(`/api/fact/saved-days?region=${region}`);
+                const dates = await res.json();
+                const tbody = document.getElementById('savedDaysTableBody');
+                if (!tbody) return;
+
+                if (dates.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="4" class="text-center py-4 text-gray-400">Нет сохраненных дней для региона ${region}.</td></tr>`;
+                    return;
+                }
+
+                let rowsHtml = '';
+                dates.forEach(dStr => {
+                    rowsHtml += `
+                        <tr class="hover:bg-gray-50">
+                            <td class="px-4 py-3 font-semibold text-gray-800">${dStr}</td>
+                            <td class="px-4 py-3 text-center text-gray-600">${region}</td>
+                            <td class="px-4 py-3 text-center"><span class="bg-green-100 text-green-800 px-2.5 py-1 rounded-full text-xs font-bold">Сохранено</span></td>
+                            <td class="px-4 py-3 text-right">
+                                <button onclick="selectSavedDate('${dStr}')" class="bg-blue-600 text-white px-3 py-1.5 rounded text-xs font-medium hover:bg-blue-700 transition">✏️ Редактировать / Просмотреть</button>
+                            </td>
+                        </tr>
+                    `;
+                });
+                tbody.innerHTML = rowsHtml;
+            }
+
+            function selectSavedDate(dStr) {
+                document.getElementById('factDate').value = dStr;
+                loadFactData();
+                window.scrollTo({ top: 0, behavior: 'smooth' });
             }
 
             async function loadBalanceData() {
@@ -888,6 +943,16 @@ def get_fact_report(report_date: str, region: str = "Город"):
   }
 
 
+@app.get("/api/fact/saved-days")
+def get_saved_days_list(region: str = "Город"):
+  storage = load_fact_children_settings()
+  saved_dates = []
+  for d_str, regions_data in storage.items():
+    if regions_data and region in regions_data and regions_data[region]:
+      saved_dates.append(d_str)
+  return sorted(saved_dates, reverse=True)
+
+
 @app.get("/api/balance/report")
 def get_balance_report(report_date: str, region: str = "Город"):
   try:
@@ -976,7 +1041,6 @@ def get_balance_report(report_date: str, region: str = "Город"):
     prod_total_balance = 0.0
 
     for pid in points_dict.keys():
-      # Безопасный поиск по строковым и числовым ключам ID
       p_init = (
           initial_stock.get(str(pid), {})
           if str(pid) in initial_stock
