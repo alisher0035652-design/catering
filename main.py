@@ -413,9 +413,28 @@ def get_dashboard():
                         </div>
                     </div>
                 </header>
-                <div class="bg-white shadow rounded-lg overflow-hidden">
+                <div class="bg-white shadow rounded-lg overflow-hidden mb-6">
                     <div id="stockMatrixContainer" class="overflow-x-auto" style="max-height: 700px;">
                         <p class="p-8 text-center text-gray-400">Загрузка матрицы инвентаризации...</p>
+                    </div>
+                </div>
+
+                <div class="bg-white shadow rounded-lg p-6">
+                    <h3 class="text-lg font-bold text-gray-800 mb-4">📅 История сохраненных актов инвентаризации (<span id="stockRegionLabel">Город</span>)</h3>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full divide-y divide-gray-200 text-sm">
+                            <thead class="bg-gray-100">
+                                <tr>
+                                    <th class="px-4 py-2 text-left font-bold text-gray-700">Дата акта</th>
+                                    <th class="px-4 py-2 text-center font-bold text-gray-700">Регион</th>
+                                    <th class="px-4 py-2 text-center font-bold text-gray-700">Статус</th>
+                                    <th class="px-4 py-2 text-right font-bold text-gray-700">Действие</th>
+                                </tr>
+                            </thead>
+                            <tbody id="savedStockDaysTableBody" class="divide-y divide-gray-200">
+                                <tr><td colspan="4" class="text-center py-4 text-gray-400">Загрузка сохраненных актов...</td></tr>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
             </div>
@@ -765,6 +784,7 @@ def get_dashboard():
             async function loadStockMatrix() {
                 const dateVal = document.getElementById('stockDate').value;
                 const region = document.getElementById('stockRegionSelect').value;
+                document.getElementById('stockRegionLabel').innerText = region;
                 const container = document.getElementById('stockMatrixContainer');
                 container.innerHTML = '<div class="text-center py-12 text-gray-500">Загрузка акта инвентаризации...</div>';
 
@@ -800,6 +820,40 @@ def get_dashboard():
                 }
                 html += `</tbody></table>`;
                 container.innerHTML = html;
+                loadSavedStockDaysList(region);
+            }
+
+            async function loadSavedStockDaysList(region) {
+                const res = await fetch(`/api/stock/saved-days?region=${region}`);
+                const dates = await res.json();
+                const tbody = document.getElementById('savedStockDaysTableBody');
+                if (!tbody) return;
+
+                if (dates.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="4" class="text-center py-4 text-gray-400">Нет сохраненных актов для региона ${region}.</td></tr>`;
+                    return;
+                }
+
+                let rowsHtml = '';
+                dates.forEach(dStr => {
+                    rowsHtml += `
+                        <tr class="hover:bg-gray-50">
+                            <td class="px-4 py-3 font-semibold text-gray-800">${dStr}</td>
+                            <td class="px-4 py-3 text-center text-gray-600">${region}</td>
+                            <td class="px-4 py-3 text-center"><span class="bg-green-100 text-green-800 px-2.5 py-1 rounded-full text-xs font-bold">Сохранено</span></td>
+                            <td class="px-4 py-3 text-right">
+                                <button onclick="selectSavedStockDate('${dStr}')" class="bg-blue-600 text-white px-3 py-1.5 rounded text-xs font-medium hover:bg-blue-700 transition">✏️ Редактировать / Просмотреть</button>
+                            </td>
+                        </tr>
+                    `;
+                });
+                tbody.innerHTML = rowsHtml;
+            }
+
+            function selectSavedStockDate(dStr) {
+                document.getElementById('stockDate').value = dStr;
+                loadStockMatrix();
+                window.scrollTo({ top: 0, behavior: 'smooth' });
             }
 
             async function saveStockMatrix() {
@@ -820,8 +874,10 @@ def get_dashboard():
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(stockPayload)
                 });
-                if (res.ok) alert('Акт инвентаризации успешно сохранен!');
-                else alert('Ошибка сохранения акта.');
+                if (res.ok) {
+                    alert('Акт инвентаризации успешно сохранен!');
+                    loadStockMatrix();
+                } else alert('Ошибка сохранения акта.');
             }
 
             async function loadMatrixRaznaryadka() {
@@ -962,6 +1018,16 @@ def get_saved_days_list(region: str = "Город"):
   return sorted(saved_dates, reverse=True)
 
 
+@app.get("/api/stock/saved-days")
+def get_saved_stock_days_list(region: str = "Город"):
+  storage = load_stock_settings()
+  saved_dates = []
+  for d_str, regions_data in storage.items():
+    if regions_data and region in regions_data and regions_data[region]:
+      saved_dates.append(d_str)
+  return sorted(saved_dates, reverse=True)
+
+
 @app.get("/api/balance/report")
 def get_balance_report(report_date: str, region: str = "Город"):
   try:
@@ -978,7 +1044,6 @@ def get_balance_report(report_date: str, region: str = "Город"):
   )
   points_list = []
   for pid, pinfo in points_dict.items():
-    # Проверяем, сохранен ли факт именно для этой точки на запрашиваемую дату
     is_saved = (str(pid) in saved_fact_children_target) or (
         pid in saved_fact_children_target
     )
@@ -989,7 +1054,7 @@ def get_balance_report(report_date: str, region: str = "Город"):
           )
       )
     else:
-      c_cnt = pinfo["children_count"]  # fallback для расчета расхода
+      c_cnt = pinfo["children_count"]
 
     points_list.append({
         "id": pid,
