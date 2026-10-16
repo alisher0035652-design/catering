@@ -271,26 +271,25 @@ def get_dashboard():
                     <span class="text-xs bg-blue-100 text-blue-800 px-2.5 py-1 rounded-full font-medium">Интегрировано с MUXSIN-FAYZ</span>
                 </div>
                 <div class="flex space-x-2">
-                    <button onclick="switchTab('matrix')" id="btnTabMatrix" class="px-4 py-2 rounded-md text-sm font-medium bg-blue-600 text-white transition">📊 Матрица закупки (План)</button>
-                    <button onclick="switchTab('fact')" id="btnTabFact" class="px-4 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">📋 Ежедневный факт расхода</button>
+                    <button onclick="switchTab('matrix')" id="btnTabMatrix" class="px-4 py-2 rounded-md text-sm font-medium bg-blue-600 text-white transition">📊 Матрица разнарядки</button>
+                    <button onclick="switchTab('fact')" id="btnTabFact" class="px-4 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">📋 Ежедневный факт</button>
                     <button onclick="switchTab('calendar')" id="btnTabCalendar" class="px-4 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">📅 Календарь меню</button>
                     <button onclick="switchTab('stock')" id="btnTabStock" class="px-4 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">📦 Инвентаризация</button>
                 </div>
             </nav>
 
-            <!-- Вкладка Плановой Матрицы -->
             <div id="tabMatrix" class="space-y-6">
                 <header class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center">
                     <div>
-                        <h1 class="text-xl font-bold text-gray-800">Матричная разнарядка (Плановая потребность)</h1>
-                        <p class="text-sm text-gray-500 mt-1">Расчет на основе планового количества детей в Location.xlsx</p>
+                        <h1 class="text-xl font-bold text-gray-800">Матричная разнарядка (Чистая потребность)</h1>
+                        <p class="text-sm text-gray-500 mt-1">Автоматический учет инвентаризации, приходов от MUXSIN-FAYZ и расхода</p>
                     </div>
                     <div class="mt-4 md:mt-0 flex flex-wrap items-center gap-3">
                         <div>
                             <label class="text-xs font-medium text-gray-600 block">Регион:</label>
                             <select id="regionSelect" class="border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500">
-                                <option value="Город" selected>Город</option>
-                                <option value="Район">Район</option>
+                                <option value="Город" selected>Город (Текущие)</option>
+                                <option value="Район">Район (Тендер / Будущие)</option>
                             </select>
                         </div>
                         <div>
@@ -298,21 +297,20 @@ def get_dashboard():
                             <input type="date" id="targetDate" class="border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500">
                         </div>
                         <div class="self-end">
-                            <button onclick="loadMatrixRaznaryadka()" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 transition">Сформировать план</button>
+                            <button onclick="loadMatrixRaznaryadka()" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 transition">Сформировать</button>
                         </div>
                     </div>
                 </header>
                 <div id="matrixResultContainer" class="space-y-6">
-                    <div class="bg-white shadow rounded-lg p-8 text-center text-gray-400">Выберите дату и нажмите «Сформировать план».</div>
+                    <div class="bg-white shadow rounded-lg p-8 text-center text-gray-400">Выберите дату и нажмите «Сформировать».</div>
                 </div>
             </div>
 
-            <!-- Вкладка ФАКТИЧЕСКОГО расхода -->
             <div id="tabFact" class="hidden space-y-6">
                 <header class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center">
                     <div>
                         <h1 class="text-xl font-bold text-gray-800">📋 Фактический отчет расхода продуктов</h1>
-                        <p class="text-sm text-gray-500 mt-1">Внесите фактическое количество присутствующих детей с утра (данные надежно сохраняются)</p>
+                        <p class="text-sm text-gray-500 mt-1">Утренний ввод детей по факту с автоматическим списанием по календарю меню</p>
                     </div>
                     <div class="mt-4 md:mt-0 flex flex-wrap items-center gap-3">
                         <div>
@@ -332,13 +330,11 @@ def get_dashboard():
                         </div>
                     </div>
                 </header>
-
                 <div id="factContainer" class="space-y-6">
                     <p class="p-8 text-center text-gray-400 bg-white shadow rounded-lg">Загрузка данных...</p>
                 </div>
             </div>
 
-            <!-- Календарь -->
             <div id="tabCalendar" class="hidden space-y-6">
                 <header class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center">
                     <div>
@@ -359,7 +355,6 @@ def get_dashboard():
                 </div>
             </div>
 
-            <!-- Инвентаризация -->
             <div id="tabStock" class="hidden space-y-6">
                 <header class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center">
                     <div>
@@ -391,6 +386,30 @@ def get_dashboard():
             </div>
         </div>
 
+        <div id="dayModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div class="bg-white rounded-lg p-6 w-96 shadow-xl space-y-4">
+                <h3 id="modalDateTitle" class="font-bold text-lg text-gray-800">Настройка дня</h3>
+                <div>
+                    <label class="block text-xs font-medium text-gray-700 mb-1">Статус дня:</label>
+                    <select id="modalIsHoliday" class="w-full border rounded px-3 py-2 text-sm">
+                        <option value="false">Рабочий день</option>
+                        <option value="true">День отдыха / Выходной (Красный)</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-700 mb-1">Принудительное меню:</label>
+                    <select id="modalMenu" class="w-full border rounded px-3 py-2 text-sm">
+                        <option value="">Автоматически по цепочке</option>
+                        <option value="1">Меню № 1</option><option value="2">Меню № 2</option><option value="3">Меню № 3</option><option value="4">Меню № 4</option><option value="5">Меню № 5</option><option value="6">Меню № 6</option><option value="7">Меню № 7</option><option value="8">Меню № 8</option><option value="9">Меню № 9</option><option value="10">Меню № 10</option>
+                    </select>
+                </div>
+                <div class="flex justify-end space-x-2 pt-2">
+                    <button onclick="closeModal()" class="bg-gray-200 px-4 py-2 rounded text-sm font-medium">Отмена</button>
+                    <button onclick="saveDaySettings()" class="bg-blue-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-blue-700">Сохранить</button>
+                </div>
+            </div>
+        </div>
+
         <script>
             document.getElementById('targetDate').valueAsDate = new Date();
             document.getElementById('stockDate').valueAsDate = new Date();
@@ -398,6 +417,7 @@ def get_dashboard():
 
             let viewYear = new Date().getFullYear();
             let viewMonth = new Date().getMonth();
+            let selectedDateStr = '';
 
             function switchTab(tab) {
                 ['matrix', 'fact', 'calendar', 'stock'].forEach(t => {
@@ -412,6 +432,79 @@ def get_dashboard():
             }
 
             function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+
+            function changeMonth(dir) {
+                viewMonth += dir;
+                if (viewMonth > 11) { viewMonth = 0; viewYear++; }
+                if (viewMonth < 0) { viewMonth = 11; viewYear--; }
+                loadCalendarGrid();
+            }
+
+            async function loadCalendarGrid() {
+                const monthNames = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
+                document.getElementById('currentMonthLabel').innerText = `${monthNames[viewMonth]} ${viewYear}`;
+                const lastDay = new Date(viewYear, viewMonth + 1, 0);
+                const startStr = `${viewYear}-${String(viewMonth + 1).padStart(2, '0')}-01`;
+                const endStr = `${viewYear}-${String(viewMonth + 1).padStart(2, '0')}-${String(lastDay.getDate()).padStart(2, '0')}`;
+
+                const response = await fetch(`/api/calendar/range?start=${startStr}&end=${endStr}`);
+                const data = await response.json();
+                const grid = document.getElementById('calendarGrid');
+                grid.innerHTML = '';
+
+                const firstDay = new Date(viewYear, viewMonth, 1);
+                let startWeekDay = (firstDay.getDay() + 6) % 7;
+                for (let i = 0; i < startWeekDay; i++) {
+                    grid.innerHTML += `<div class="bg-gray-50 rounded-lg min-h-[105px] opacity-30"></div>`;
+                }
+
+                for (let d = 1; d <= lastDay.getDate(); d++) {
+                    const dStr = `${viewYear}-${String(viewMonth + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+                    const info = data[dStr] || { is_holiday: false, menu: 1, forced: false };
+                    let bgClass = "bg-white border-gray-200 hover:border-blue-400";
+                    let badgeBg = "bg-blue-100 text-blue-800";
+                    let statusText = `Меню № ${info.menu}`;
+
+                    if (info.is_holiday) {
+                        bgClass = "bg-red-50 border-red-300 hover:border-red-500";
+                        badgeBg = "bg-red-200 text-red-900";
+                        statusText = "День отдыха";
+                    } else if (info.forced) {
+                        badgeBg = "bg-purple-100 text-purple-800";
+                        statusText += " (Руч.)";
+                    }
+
+                    grid.innerHTML += `
+                        <div onclick="openDayModal('${dStr}', ${info.is_holiday}, ${info.menu !== null ? info.menu : 'null'})" class="border ${bgClass} rounded-lg p-3 min-h-[105px] flex flex-col justify-between cursor-pointer shadow-sm transition">
+                            <div class="flex justify-between items-center"><span class="font-bold text-sm text-gray-700">${d}</span></div>
+                            <div class="text-center my-auto"><span class="inline-block px-2.5 py-1 rounded-md text-xs font-bold ${badgeBg}">${statusText}</span></div>
+                        </div>
+                    `;
+                }
+            }
+
+            function openDayModal(dateStr, isHoliday, menuNum) {
+                selectedDateStr = dateStr;
+                document.getElementById('modalDateTitle').innerText = `Настройка дня: ${dateStr}`;
+                document.getElementById('modalIsHoliday').value = isHoliday ? "true" : "false";
+                document.getElementById('modalMenu').value = (menuNum !== 'null' && menuNum !== null) ? menuNum : "";
+                document.getElementById('dayModal').classList.remove('hidden');
+            }
+
+            function closeModal() { document.getElementById('dayModal').classList.add('hidden'); }
+
+            async function saveDaySettings() {
+                const is_holiday = document.getElementById('modalIsHoliday').value === 'true';
+                const menuVal = document.getElementById('modalMenu').value;
+                const menu = menuVal ? parseInt(menuVal) : null;
+                await fetch('/api/calendar/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ date: selectedDateStr, is_holiday, menu })
+                });
+                closeModal();
+                loadCalendarGrid();
+            }
 
             async function loadFactData() {
                 const dateVal = document.getElementById('factDate').value;
@@ -505,7 +598,7 @@ def get_dashboard():
                 });
 
                 if (res.ok) {
-                    alert('Фактическое присутствие детей успешно сохранено в базе!');
+                    alert('Фактическое присутствие детей успешно сохранено!');
                     loadFactData();
                 } else alert('Ошибка сохранения.');
             }
@@ -583,7 +676,7 @@ def get_dashboard():
                 const region = document.getElementById('regionSelect').value;
                 const container = document.getElementById('matrixResultContainer');
                 if (!dateStr) { alert('Выберите дату'); return; }
-                container.innerHTML = '<div class="text-center py-12 text-gray-500">Формирование плановой закупки...</div>';
+                container.innerHTML = '<div class="text-center py-12 text-gray-500">Формирование точной закупки (с учетом MUXSIN-FAYZ)...</div>';
 
                 try {
                     const response = await fetch(`/api/raznaryadka/matrix/${dateStr}?region=${region}`);
@@ -606,7 +699,7 @@ def get_dashboard():
 
                         <div class="bg-white shadow rounded-lg overflow-hidden">
                             <div class="bg-gray-50 px-6 py-4 border-b border-gray-200">
-                                <h3 class="text-lg font-medium text-gray-900">📊 Плановая потребность к закупке (Нетто)</h3>
+                                <h3 class="text-lg font-medium text-gray-900">📊 Чистая потребность к закупке</h3>
                             </div>
                             <div class="overflow-x-auto" style="max-height: 700px;">
                                 <table class="min-w-full divide-y divide-gray-200 text-xs border-collapse">
@@ -781,7 +874,13 @@ def get_stock_matrix_api(region: str, date: str = None):
   ]
   all_products = get_all_products_with_units()
   stock_storage = load_stock_settings()
-  target_inv_date = date if date else str(date.today())
+  target_inv_date = (
+      date
+      if date
+      else str(date.today())
+      if "date" in globals()
+      else "2026-10-01"
+  )
   region_stock = stock_storage.get(target_inv_date, {}).get(region, {})
 
   products_matrix = {}
