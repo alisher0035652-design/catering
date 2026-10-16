@@ -512,72 +512,76 @@ def get_dashboard():
                 const container = document.getElementById('factContainer');
                 container.innerHTML = '<div class="text-center py-12 text-gray-500 bg-white rounded-lg shadow">Загрузка сохраненных данных факта...</div>';
 
-                const res = await fetch(`/api/fact/report?date=${dateVal}&region=${region}`);
-                const data = await res.json();
+                try {
+                    const res = await fetch(`/api/fact/report?report_date=${dateVal}&region=${region}`);
+                    const data = await res.json();
 
-                let html = `
-                    <div class="bg-white shadow rounded-lg p-6 border-l-4 border-green-500">
-                        <div class="flex justify-between items-center mb-4">
-                            <h3 class="font-bold text-gray-800 text-lg">👶 Фактическое присутствие детей на ${data.date}</h3>
-                            <span class="text-xs bg-purple-100 text-purple-800 font-bold px-3 py-1 rounded-full">${data.menu_num ? 'Меню № ' + data.menu_num : 'Выходной / Нет меню'}</span>
-                        </div>
-                        <div class="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-3">
-                `;
-
-                data.points.forEach(p => {
-                    const childVal = data.fact_children[p.id] !== undefined ? data.fact_children[p.id] : p.default_children;
-                    html += `
-                        <div class="bg-gray-50 p-2.5 border rounded-md text-center">
-                            <div class="text-xs font-bold text-gray-700 truncate" title="${p.name}">${p.name}</div>
-                            <div class="text-[10px] text-gray-400 mb-1">(План: ${p.default_children})</div>
-                            <input type="number" data-point-fact="${p.id}" value="${childVal}" class="fact-child-cell border border-gray-300 rounded px-2 py-1 text-center text-sm w-full font-bold text-green-700 focus:ring-2 focus:ring-green-500">
-                        </div>
+                    let html = `
+                        <div class="bg-white shadow rounded-lg p-6 border-l-4 border-green-500">
+                            <div class="flex justify-between items-center mb-4">
+                                <h3 class="font-bold text-gray-800 text-lg">👶 Фактическое присутствие детей на ${data.date}</h3>
+                                <span class="text-xs bg-purple-100 text-purple-800 font-bold px-3 py-1 rounded-full">${data.menu_num ? 'Меню № ' + data.menu_num : 'Выходной / Нет меню'}</span>
+                            </div>
+                            <div class="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-3">
                     `;
-                });
 
-                html += `</div></div>`;
-
-                if (!data.menu_num) {
-                    html += `<div class="bg-white p-8 text-center text-red-500 font-bold rounded-lg shadow">В этот день по календарю выходной — списание не производится.</div>`;
-                    container.innerHTML = html;
-                    return;
-                }
-
-                html += `
-                    <div class="bg-white shadow rounded-lg overflow-hidden">
-                        <div class="bg-gray-50 px-6 py-4 border-b border-gray-200">
-                            <h3 class="text-lg font-bold text-gray-800">📦 Фактический расход продуктов за ${data.date}</h3>
-                        </div>
-                        <div class="overflow-x-auto" style="max-height: 600px;">
-                            <table class="min-w-full divide-y divide-gray-200 text-xs border-collapse">
-                                <thead class="bg-gray-100 sticky top-0 z-10">
-                                    <tr>
-                                        <th class="px-4 py-3 text-left font-bold text-gray-700 border-r bg-gray-100 sticky left-0 z-20 min-w-[180px]">Продукт</th>
-                                        <th class="px-3 py-3 text-center font-bold text-gray-700 border-r bg-gray-100 min-w-[70px]">Ед.</th>
-                `;
-
-                data.points.forEach(p => {
-                    const childVal = data.fact_children[p.id] !== undefined ? data.fact_children[p.id] : p.default_children;
-                    html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]">${p.name}<br><span class="text-[10px] text-green-600">(${childVal} факт)</span></th>`;
-                });
-
-                html += `<th class="px-4 py-3 text-center font-bold text-green-800 bg-green-50">ИТОГО ФАКТ</th></tr></thead><tbody class="divide-y divide-gray-200 bg-white">`;
-
-                for (const [prodName, rowData] of Object.entries(data.fact_consumption)) {
-                    html += `
-                        <tr class="hover:bg-gray-50">
-                            <td class="px-4 py-3 font-medium text-gray-900 border-r bg-white sticky left-0 z-10">${prodName}</td>
-                            <td class="px-3 py-3 text-center text-gray-500 border-r bg-gray-50">${rowData.unit}</td>
-                    `;
                     data.points.forEach(p => {
-                        const val = rowData.points_qty[p.id] || 0;
-                        html += `<td class="px-3 py-3 text-center border-r text-gray-700 ${val > 0 ? 'font-semibold text-green-700' : 'text-gray-300'}">${val > 0 ? val : '-'}</td>`;
+                        const childVal = data.fact_children[p.id] !== undefined ? data.fact_children[p.id] : p.default_children;
+                        html += `
+                            <div class="bg-gray-50 p-2.5 border rounded-md text-center">
+                                <div class="text-xs font-bold text-gray-700 truncate" title="${p.name}">${p.name}</div>
+                                <div class="text-[10px] text-gray-400 mb-1">(План: ${p.default_children})</div>
+                                <input type="number" data-point-fact="${p.id}" value="${childVal}" class="fact-child-cell border border-gray-300 rounded px-2 py-1 text-center text-sm w-full font-bold text-green-700 focus:ring-2 focus:ring-green-500">
+                            </div>
+                        `;
                     });
-                    html += `<td class="px-4 py-3 text-center font-bold text-green-900 bg-green-50">${rowData.total_fact}</td></tr>`;
-                }
 
-                html += `</tbody></table></div></div>`;
-                container.innerHTML = html;
+                    html += `</div></div>`;
+
+                    if (!data.menu_num) {
+                        html += `<div class="bg-white p-8 text-center text-red-500 font-bold rounded-lg shadow">В этот день по календарю выходной — списание не производится.</div>`;
+                        container.innerHTML = html;
+                        return;
+                    }
+
+                    html += `
+                        <div class="bg-white shadow rounded-lg overflow-hidden">
+                            <div class="bg-gray-50 px-6 py-4 border-b border-gray-200">
+                                <h3 class="text-lg font-bold text-gray-800">📦 Фактический расход продуктов за ${data.date}</h3>
+                            </div>
+                            <div class="overflow-x-auto" style="max-height: 600px;">
+                                <table class="min-w-full divide-y divide-gray-200 text-xs border-collapse">
+                                    <thead class="bg-gray-100 sticky top-0 z-10">
+                                        <tr>
+                                            <th class="px-4 py-3 text-left font-bold text-gray-700 border-r bg-gray-100 sticky left-0 z-20 min-w-[180px]">Продукт</th>
+                                            <th class="px-3 py-3 text-center font-bold text-gray-700 border-r bg-gray-100 min-w-[70px]">Ед.</th>
+                    `;
+
+                    data.points.forEach(p => {
+                        const childVal = data.fact_children[p.id] !== undefined ? data.fact_children[p.id] : p.default_children;
+                        html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]">${p.name}<br><span class="text-[10px] text-green-600">(${childVal} факт)</span></th>`;
+                    });
+
+                    html += `<th class="px-4 py-3 text-center font-bold text-green-800 bg-green-50">ИТОГО ФАКТ</th></tr></thead><tbody class="divide-y divide-gray-200 bg-white">`;
+
+                    for (const [prodName, rowData] of Object.entries(data.fact_consumption)) {
+                        html += `
+                            <tr class="hover:bg-gray-50">
+                                <td class="px-4 py-3 font-medium text-gray-900 border-r bg-white sticky left-0 z-10">${prodName}</td>
+                                <td class="px-3 py-3 text-center text-gray-500 border-r bg-gray-50">${rowData.unit}</td>
+                        `;
+                        data.points.forEach(p => {
+                            const val = rowData.points_qty[p.id] || 0;
+                            html += `<td class="px-3 py-3 text-center border-r text-gray-700 ${val > 0 ? 'font-semibold text-green-700' : 'text-gray-300'}">${val > 0 ? val : '-'}</td>`;
+                        });
+                        html += `<td class="px-4 py-3 text-center font-bold text-green-900 bg-green-50">${rowData.total_fact}</td></tr>`;
+                    }
+
+                    html += `</tbody></table></div></div>`;
+                    container.innerHTML = html;
+                } catch (err) {
+                    container.innerHTML = '<div class="text-center py-12 text-red-500 bg-white rounded-lg shadow">Ошибка загрузки данных факта.</div>';
+                }
             }
 
             async function saveFactChildren() {
@@ -591,7 +595,7 @@ def get_dashboard():
                     payload[pid] = val;
                 });
 
-                const res = await fetch(`/api/fact/children?date=${dateVal}&region=${region}`, {
+                const res = await fetch(`/api/fact/children?report_date=${dateVal}&region=${region}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
@@ -606,7 +610,7 @@ def get_dashboard():
             function downloadFactExcel() {
                 const dateVal = document.getElementById('factDate').value;
                 const region = document.getElementById('factRegionSelect').value;
-                window.location.href = `/api/fact/export/excel?date=${dateVal}&region=${region}`;
+                window.location.href = `/api/fact/export/excel?report_date=${dateVal}&region=${region}`;
             }
 
             async function loadStockMatrix() {
@@ -741,9 +745,9 @@ def get_dashboard():
 
 
 @app.get("/api/fact/report")
-def get_fact_report(date: str, region: str = "Город"):
+def get_fact_report(report_date: str, region: str = "Город"):
   try:
-    parsed_date = date.fromisoformat(date)
+    parsed_date = date.fromisoformat(report_date)
   except Exception:
     parsed_date = date.today()
 
@@ -758,7 +762,7 @@ def get_fact_report(date: str, region: str = "Город"):
   ]
 
   fact_storage = load_fact_children_settings()
-  saved_fact_children = fact_storage.get(date, {}).get(region, {})
+  saved_fact_children = fact_storage.get(report_date, {}).get(region, {})
 
   menu_num = get_menu_number_for_date_custom(parsed_date)
   fact_consumption = {}
@@ -789,7 +793,7 @@ def get_fact_report(date: str, region: str = "Город"):
       }
 
   return {
-      "date": date,
+      "date": report_date,
       "region": region,
       "menu_num": menu_num,
       "points": points_list,
@@ -799,25 +803,25 @@ def get_fact_report(date: str, region: str = "Город"):
 
 
 @app.post("/api/fact/children")
-def save_fact_children_api(data: dict, date: str, region: str = "Город"):
+def save_fact_children_api(data: dict, report_date: str, region: str = "Город"):
   storage = load_fact_children_settings()
-  if date not in storage:
-    storage[date] = {}
-  storage[date][region] = data
+  if report_date not in storage:
+    storage[report_date] = {}
+  storage[report_date][region] = data
   save_fact_children_settings(storage)
   return {"status": "success"}
 
 
 @app.get("/api/fact/export/excel")
-def export_fact_excel(date: str, region: str = "Город"):
+def export_fact_excel(report_date: str, region: str = "Город"):
   try:
-    parsed_date = date.fromisoformat(date)
+    parsed_date = date.fromisoformat(report_date)
   except Exception:
     parsed_date = date.today()
 
   points_dict = load_points_from_excel(region)
   fact_storage = load_fact_children_settings()
-  saved_fact_children = fact_storage.get(date, {}).get(region, {})
+  saved_fact_children = fact_storage.get(report_date, {}).get(region, {})
   menu_num = get_menu_number_for_date_custom(parsed_date)
 
   rows_data = []
@@ -845,7 +849,7 @@ def export_fact_excel(date: str, region: str = "Город"):
 
   output = io.BytesIO()
   with pd.ExcelWriter(output, engine="openpyxl") as writer:
-    df.to_excel(writer, index=False, sheet_name=f"Факт_{date}")
+    df.to_excel(writer, index=False, sheet_name=f"Факт_{report_date}")
   output.seek(0)
 
   return StreamingResponse(
@@ -855,7 +859,7 @@ def export_fact_excel(date: str, region: str = "Город"):
       ),
       headers={
           "Content-Disposition": (
-              f"attachment; filename=Fact_Consumption_{region}_{date}.xlsx"
+              f"attachment; filename=Fact_Consumption_{region}_{report_date}.xlsx"
           )
       },
   )
@@ -874,13 +878,7 @@ def get_stock_matrix_api(region: str, date: str = None):
   ]
   all_products = get_all_products_with_units()
   stock_storage = load_stock_settings()
-  target_inv_date = (
-      date
-      if date
-      else str(date.today())
-      if "date" in globals()
-      else "2026-10-01"
-  )
+  target_inv_date = date if date else str(date.today())
   region_stock = stock_storage.get(target_inv_date, {}).get(region, {})
 
   products_matrix = {}
