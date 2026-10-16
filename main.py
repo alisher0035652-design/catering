@@ -15,7 +15,6 @@ SETTINGS_FILE = "calendar_settings.json"
 STOCK_FILE = "stock_settings.json"
 FACT_CHILDREN_FILE = "fact_children_settings.json"
 
-# Кэш в памяти для ускорения работы
 _MENU_CACHE = {}
 
 
@@ -719,9 +718,12 @@ def get_dashboard():
                         `;
                         data.points.forEach(p => {
                             const val = rowData.points_balance[p.id] || 0;
-                            html += `<td class="px-3 py-3 text-center border-r font-bold ${val > 0 ? 'text-indigo-600' : 'text-red-500'}">${val}</td>`;
+                            // Отрицательные значения выделяем красным цветом
+                            const colorClass = val < 0 ? 'text-red-600 font-extrabold bg-red-50' : (val > 0 ? 'text-indigo-600 font-bold' : 'text-gray-400');
+                            html += `<td class="px-3 py-3 text-center border-r ${colorClass}">${val}</td>`;
                         });
-                        html += `<td class="px-4 py-3 text-center font-bold text-indigo-900 bg-indigo-50">${rowData.total_balance}</td></tr>`;
+                        const totalColorClass = rowData.total_balance < 0 ? 'text-red-700 bg-red-100 font-extrabold' : 'text-indigo-900 font-bold';
+                        html += `<td class="px-4 py-3 text-center ${totalColorClass} bg-indigo-50">${rowData.total_balance}</td></tr>`;
                     }
 
                     html += `</tbody></table></div></div>`;
@@ -1072,8 +1074,9 @@ def get_balance_report(report_date: str, region: str = "Город"):
           else float(p_cons or 0.0)
       )
 
+      # Убрали max(0.0, ...) чтобы остатки могли уходить в минус
       bal = (init_val + purch_val) - cons_val
-      bal_rounded = round(max(0.0, bal), 2)
+      bal_rounded = round(bal, 2)
       points_balance[pid] = bal_rounded
       prod_total_balance += bal_rounded
 
@@ -1285,7 +1288,7 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
       purch_val = p_purch.get(prod, 0.0)
       cons_val = p_cons.get(prod, 0.0)
       net_stock = (init_val + purch_val) - cons_val
-      effective_stock[pid][prod] = max(0.0, net_stock)
+      effective_stock[pid][prod] = net_stock
 
   matrix_data = {}
   working_days_count = 0
