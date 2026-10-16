@@ -976,11 +976,33 @@ def get_balance_report(report_date: str, region: str = "Город"):
     prod_total_balance = 0.0
 
     for pid in points_dict.keys():
-      p_init = initial_stock.get(str(pid), {}).get(prod_name, 0.0)
-      p_purch = purchases_between.get(pid, {}).get(prod_name, 0.0)
-      p_cons = consumed_between.get(pid, {}).get(prod_name, 0.0)
+      # Безопасный поиск по строковым и числовым ключам ID
+      p_init = (
+          initial_stock.get(str(pid), {})
+          if str(pid) in initial_stock
+          else initial_stock.get(pid, {})
+      )
+      init_val = (
+          p_init.get(prod_name, 0.0)
+          if isinstance(p_init, dict)
+          else float(p_init or 0.0)
+      )
 
-      bal = (p_init + p_purch) - p_cons
+      p_purch = purchases_between.get(pid, {})
+      purch_val = (
+          p_purch.get(prod_name, 0.0)
+          if isinstance(p_purch, dict)
+          else float(p_purch or 0.0)
+      )
+
+      p_cons = consumed_between.get(pid, {})
+      cons_val = (
+          p_cons.get(prod_name, 0.0)
+          if isinstance(p_cons, dict)
+          else float(p_cons or 0.0)
+      )
+
+      bal = (init_val + purch_val) - cons_val
       bal_rounded = round(max(0.0, bal), 2)
       points_balance[pid] = bal_rounded
       prod_total_balance += bal_rounded
