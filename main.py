@@ -719,4 +719,77 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
         if menu_num is not None:
           day_menu = load_menu_from_excel(menu_num)
           for pid, pinfo in points_dict.items():
-            children =
+            children = pinfo["children_count"]
+            if pid not in consumed_between:
+              consumed_between[pid] = {}
+            for prod_name, pdata in day_menu.items():
+              consumed_between[pid][prod_name] = consumed_between[pid].get(
+                  prod_name, 0.0
+              ) + (pdata.get("qty_per_child", 0.0) * children)
+        curr_d += timedelta(days=1)
+
+  # 4. Эффективный остаток на начало недели
+  effective_stock = {}
+  for pid in points_dict.keys():
+    effective_stock[pid] = {}
+    p_init = initial_stock.get(str(pid), {})
+    p_purch = purchases_between.get(pid, {})
+    p_cons = consumed_between.get(pid, {})
+    all_prods = set(
+        list(p_init.keys()) + list(p_purch.keys()) + list(p_cons.keys())
+    )
+    for prod in all_prods:
+      init_val = p_init.get(prod, 0.0)
+      purch_val = p_purch.get(prod, 0.0)
+      cons_val = p_cons.get(prod, 0.0)
+      net_stock = (init_val + purch_val) - cons_val
+      effective_stock[pid][prod] = max(0.0, net_stock)
+
+  # 5. Валовая потребность недели
+  matrix_data = {}
+  working_days_count = 0
+  for day in week_days:
+    menu_num = get_menu_number_for_date_custom(day)
+    if menu_num is None:
+      continue
+    working_days_count += 1
+    ttk_items = load_menu_from_excel(menu_num)
+    for point_id, point_info in points_dict.items():
+      children = point_info["children_count"]
+      for prod_name, data in ttk_items.items():
+        kg_per_child = data.get("qty_per_child", 0.0)
+        unit = data["unit"]
+        needed = kg_per_child * children
+        if prod_name not in matrix_data:
+          matrix_data[prod_name] = {
+              "unit": unit,
+              "points_qty": {pid: 0.0 for pid in points_dict.keys()},
+              "weekly_total": 0.0,
+          }
+        matrix_data[prod_name]["points_qty"][point_id] += needed
+
+  # 6. Расчет чистой потребности (Нетто)
+  for prod_name, prod_info in matrix_data.items():
+    weekly_sum = 0.0
+    for pid in points_dict.keys():
+      gross_qty = prod_info["points_qty"][pid]
+      stock_at_start = 0.0
+      p_stocks = effective_stock.get(pid, {})
+      for st_prod, st_qty in p_stocks.items():
+        if st_prod.strip().lower() == prod_name.strip().lower():
+          stock_at_start += st_qty
+
+      net_qty = max(0.0, gross_qty - stock_at_start)
+      prod_info["points_qty"][pid] = round(net_qty, 2)
+      weekly_sum += net_qty
+    prod_info["weekly_total"] = round(weekly_sum, 2)
+
+  return {
+      "week_start": week_days[0].isoformat(),
+      "week_end": week_days[4].isoformat(),
+      "region": region,
+      "inv_date": inv_date_used,
+      "working_days_count": working_days_count,
+      "points": points_list,
+      "matrix": matrix_data,
+  }
