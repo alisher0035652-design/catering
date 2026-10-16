@@ -64,14 +64,14 @@ def save_stock_settings(settings: dict):
 def load_purchases_settings() -> dict:
   """Автоматически подтягивает отгрузки организации 'MUXSIN-FAYZ' из базы данных
 
-  и точно сопоставляет их с точками МТТ по номеру клиента.
+  и сопоставляет их с точками МТТ строго по числовому номеру из Location.xlsx.
   """
   purchases_by_region = {"Город": {}, "Район": {}}
   try:
     conn = get_db_connection()
     cursor = conn.cursor()
     query = """
-            SELECT d.date, c.id as client_id, c.category, c.client_number, i.name as product_name, si.quantity
+            SELECT d.date, c.category, c.client_number, i.name as product_name, si.quantity
             FROM sales_docs d
             JOIN clients c ON d.client_id = c.id
             JOIN sales_items si ON si.doc_id = d.id
@@ -88,20 +88,20 @@ def load_purchases_settings() -> dict:
 
     for r in rows:
       date_str = str(r["date"]).split("T")[0] if r["date"] else ""
-      category = str(r["category"]).strip().lower()
+      category_raw = str(r["category"]).strip().lower()
+
       region = (
-          "Город" if "город" in category or "текущие" in category else "Район"
+          "Город" if "город" in category_raw or "текущие" in category_raw else "Район"
       )
 
       points_dict = points_gorod if region == "Город" else points_rayon
-      target_point_id = None
       db_client_num = int(r["client_number"])
 
-      # Точное сопоставление номера МТТ с использованием регулярных выражений
+      target_point_id = None
       for pid, pinfo in points_dict.items():
-        name_str = pinfo["name"]
-        numbers_in_name = re.findall(r"\d+", name_str)
-        if numbers_in_name and int(numbers_in_name[0]) == db_client_num:
+        name_str = str(pinfo["name"])
+        numbers = re.findall(r"\d+", name_str)
+        if numbers and int(numbers[0]) == db_client_num:
           target_point_id = pid
           break
 
@@ -688,9 +688,9 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
     inv_date_used = available_inv_dates[-1]
     initial_stock = stock_storage[inv_date_used].get(region, {})
 
-  # 2. Автоматические приходы от MUXSIN-FAYZ (учитываем даже при отсутствии акта инвентаризации)
+  # 2. Автоматические приходы от MUXSIN-FAYZ
   purchases_storage = load_purchases_settings().get(region, {})
-  purchases_between = {}  # { point_id: { prod: qty } }
+  purchases_between = {}
 
   inv_dt = (
       date.fromisoformat(inv_date_used) if inv_date_used else date(2000, 1, 1)
@@ -719,77 +719,4 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
         if menu_num is not None:
           day_menu = load_menu_from_excel(menu_num)
           for pid, pinfo in points_dict.items():
-            children = pinfo["children_count"]
-            if pid not in consumed_between:
-              consumed_between[pid] = {}
-            for prod_name, pdata in day_menu.items():
-              consumed_between[pid][prod_name] = consumed_between[pid].get(
-                  prod_name, 0.0
-              ) + (pdata.get("qty_per_child", 0.0) * children)
-        curr_d += timedelta(days=1)
-
-  # 4. Эффективный остаток на начало недели
-  effective_stock = {}
-  for pid in points_dict.keys():
-    effective_stock[pid] = {}
-    p_init = initial_stock.get(str(pid), {})
-    p_purch = purchases_between.get(pid, {})
-    p_cons = consumed_between.get(pid, {})
-    all_prods = set(
-        list(p_init.keys()) + list(p_purch.keys()) + list(p_cons.keys())
-    )
-    for prod in all_prods:
-      init_val = p_init.get(prod, 0.0)
-      purch_val = p_purch.get(prod, 0.0)
-      cons_val = p_cons.get(prod, 0.0)
-      net_stock = (init_val + purch_val) - cons_val
-      effective_stock[pid][prod] = max(0.0, net_stock)
-
-  # 5. Валовая потребность недели
-  matrix_data = {}
-  working_days_count = 0
-  for day in week_days:
-    menu_num = get_menu_number_for_date_custom(day)
-    if menu_num is None:
-      continue
-    working_days_count += 1
-    ttk_items = load_menu_from_excel(menu_num)
-    for point_id, point_info in points_dict.items():
-      children = point_info["children_count"]
-      for prod_name, data in ttk_items.items():
-        kg_per_child = data.get("qty_per_child", 0.0)
-        unit = data["unit"]
-        needed = kg_per_child * children
-        if prod_name not in matrix_data:
-          matrix_data[prod_name] = {
-              "unit": unit,
-              "points_qty": {pid: 0.0 for pid in points_dict.keys()},
-              "weekly_total": 0.0,
-          }
-        matrix_data[prod_name]["points_qty"][point_id] += needed
-
-  # 6. Расчет чистой потребности (Нетто) с точным сравнением имен продуктов
-  for prod_name, prod_info in matrix_data.items():
-    weekly_sum = 0.0
-    for pid in points_dict.keys():
-      gross_qty = prod_info["points_qty"][pid]
-      stock_at_start = 0.0
-      p_stocks = effective_stock.get(pid, {})
-      for st_prod, st_qty in p_stocks.items():
-        if st_prod.strip().lower() == prod_name.strip().lower():
-          stock_at_start += st_qty
-
-      net_qty = max(0.0, gross_qty - stock_at_start)
-      prod_info["points_qty"][pid] = round(net_qty, 2)
-      weekly_sum += net_qty
-    prod_info["weekly_total"] = round(weekly_sum, 2)
-
-  return {
-      "week_start": week_days[0].isoformat(),
-      "week_end": week_days[4].isoformat(),
-      "region": region,
-      "inv_date": inv_date_used,
-      "working_days_count": working_days_count,
-      "points": points_list,
-      "matrix": matrix_data,
-  }
+            children =
