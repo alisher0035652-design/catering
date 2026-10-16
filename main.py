@@ -15,6 +15,9 @@ SETTINGS_FILE = "calendar_settings.json"
 STOCK_FILE = "stock_settings.json"
 FACT_CHILDREN_FILE = "fact_children_settings.json"
 
+# Кэш в памяти для ускорения работы
+_MENU_CACHE = {}
+
 
 def get_db_connection():
   database_url = os.environ.get("DATABASE_URL")
@@ -217,6 +220,9 @@ def load_points_from_excel(region: str = "Город") -> dict:
 
 
 def load_menu_from_excel(menu_num: int) -> dict:
+  if menu_num in _MENU_CACHE:
+    return _MENU_CACHE[menu_num]
+
   sheet_name = f"{menu_num}-Меню"
   try:
     df = pd.read_excel("Menu.xlsx", sheet_name=sheet_name)
@@ -236,6 +242,7 @@ def load_menu_from_excel(menu_num: int) -> dict:
         qty_in_kg = val
         display_unit = unit if unit else "шт"
       menu_items[prod_name] = {"qty_per_child": qty_in_kg, "unit": display_unit}
+    _MENU_CACHE[menu_num] = menu_items
     return menu_items
   except Exception as e:
     print(f"Ошибка чтения листа {sheet_name}: {e}")
@@ -613,7 +620,6 @@ def get_dashboard():
                         html += `</tbody></table></div></div>`;
                     }
 
-                    // Блок снизу: Список сохраненных дней с возможностью редактирования
                     html += `
                         <div class="bg-white shadow rounded-lg p-6">
                             <h3 class="text-lg font-bold text-gray-800 mb-4">📅 История сохраненных дней по фактическому вводу (${region})</h3>
