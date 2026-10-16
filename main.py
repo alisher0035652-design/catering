@@ -265,16 +265,17 @@ def get_dashboard():
     </head>
     <body class="bg-gray-50 text-gray-800 font-sans">
         <div class="max-w-[95%] mx-auto px-4 py-8">
-            <nav class="bg-white shadow rounded-lg p-4 mb-6 flex justify-between items-center">
+            <nav class="bg-white shadow rounded-lg p-4 mb-6 flex justify-between items-center flex-wrap gap-3">
                 <div class="flex items-center space-x-3">
                     <span class="text-xl font-bold text-blue-600">🍽 Кетеринг ERP</span>
-                    <span class="text-xs bg-blue-100 text-blue-800 px-2.5 py-1 rounded-full font-medium">Интегрировано с MUXSIN-FAYZ</span>
+                    <span class="text-xs bg-blue-100 text-blue-800 px-2.5 py-1 rounded-full font-medium">MUXSIN-FAYZ</span>
                 </div>
-                <div class="flex space-x-2">
-                    <button onclick="switchTab('matrix')" id="btnTabMatrix" class="px-4 py-2 rounded-md text-sm font-medium bg-blue-600 text-white transition">📊 Матрица разнарядки</button>
-                    <button onclick="switchTab('fact')" id="btnTabFact" class="px-4 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">📋 Ежедневный факт</button>
-                    <button onclick="switchTab('calendar')" id="btnTabCalendar" class="px-4 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">📅 Календарь меню</button>
-                    <button onclick="switchTab('stock')" id="btnTabStock" class="px-4 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">📦 Инвентаризация</button>
+                <div class="flex flex-wrap gap-2">
+                    <button onclick="switchTab('matrix')" id="btnTabMatrix" class="px-3 py-2 rounded-md text-sm font-medium bg-blue-600 text-white transition">📊 Матрица разнарядки</button>
+                    <button onclick="switchTab('fact')" id="btnTabFact" class="px-3 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">📋 Ежедневный факт</button>
+                    <button onclick="switchTab('balance')" id="btnTabBalance" class="px-3 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">📦 Остатки по МТТ</button>
+                    <button onclick="switchTab('calendar')" id="btnTabCalendar" class="px-3 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">📅 Календарь меню</button>
+                    <button onclick="switchTab('stock')" id="btnTabStock" class="px-3 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">⚙️ Инвентаризация</button>
                 </div>
             </nav>
 
@@ -332,6 +333,34 @@ def get_dashboard():
                 </header>
                 <div id="factContainer" class="space-y-6">
                     <p class="p-8 text-center text-gray-400 bg-white shadow rounded-lg">Загрузка данных...</p>
+                </div>
+            </div>
+
+            <div id="tabBalance" class="hidden space-y-6">
+                <header class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center">
+                    <div>
+                        <h1 class="text-xl font-bold text-gray-800">📦 Актуальные остатки продуктов по МТТ</h1>
+                        <p class="text-sm text-gray-500 mt-1">Формула: Остаток = Начальный остаток + Приход (MUXSIN-FAYZ) - Расход фактический</p>
+                    </div>
+                    <div class="mt-4 md:mt-0 flex flex-wrap items-center gap-3">
+                        <div>
+                            <label class="text-xs font-medium text-gray-600 block">Регион:</label>
+                            <select id="balanceRegionSelect" onchange="loadBalanceData()" class="border border-gray-300 rounded-md px-3 py-2 text-sm">
+                                <option value="Город" selected>Город</option>
+                                <option value="Район">Район</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="text-xs font-medium text-gray-600 block">На дату:</label>
+                            <input type="date" id="balanceDate" onchange="loadBalanceData()" class="border border-gray-300 rounded-md px-3 py-2 text-sm">
+                        </div>
+                        <div class="self-end">
+                            <button onclick="loadBalanceData()" class="bg-indigo-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-indigo-700 transition">Обновить остатки</button>
+                        </div>
+                    </div>
+                </header>
+                <div id="balanceContainer" class="space-y-6">
+                    <p class="p-8 text-center text-gray-400 bg-white shadow rounded-lg">Загрузка остатков...</p>
                 </div>
             </div>
 
@@ -414,21 +443,28 @@ def get_dashboard():
             document.getElementById('targetDate').valueAsDate = new Date();
             document.getElementById('stockDate').valueAsDate = new Date();
             document.getElementById('factDate').valueAsDate = new Date();
+            document.getElementById('balanceDate').valueAsDate = new Date();
 
             let viewYear = new Date().getFullYear();
             let viewMonth = new Date().getMonth();
             let selectedDateStr = '';
 
             function switchTab(tab) {
-                ['matrix', 'fact', 'calendar', 'stock'].forEach(t => {
-                    document.getElementById('tab' + capitalize(t)).classList.add('hidden');
-                    document.getElementById('btnTab' + capitalize(t)).className = "px-4 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition";
+                ['matrix', 'fact', 'balance', 'calendar', 'stock'].forEach(t => {
+                    const el = document.getElementById('tab' + capitalize(t));
+                    const btn = document.getElementById('btnTab' + capitalize(t));
+                    if (el) el.classList.add('hidden');
+                    if (btn) btn.className = "px-3 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition";
                 });
-                document.getElementById('tab' + capitalize(tab)).classList.remove('hidden');
-                document.getElementById('btnTab' + capitalize(tab)).className = "px-4 py-2 rounded-md text-sm font-medium bg-blue-600 text-white transition";
+                const activeTab = document.getElementById('tab' + capitalize(tab));
+                const activeBtn = document.getElementById('btnTab' + capitalize(tab));
+                if (activeTab) activeTab.classList.remove('hidden');
+                if (activeBtn) activeBtn.className = "px-3 py-2 rounded-md text-sm font-medium bg-blue-600 text-white transition";
+
                 if (tab === 'calendar') loadCalendarGrid();
                 if (tab === 'stock') loadStockMatrix();
                 if (tab === 'fact') loadFactData();
+                if (tab === 'balance') loadBalanceData();
             }
 
             function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
@@ -510,14 +546,14 @@ def get_dashboard():
                 const dateVal = document.getElementById('factDate').value;
                 const region = document.getElementById('factRegionSelect').value;
                 const container = document.getElementById('factContainer');
-                container.innerHTML = '<div class="text-center py-12 text-gray-500 bg-white rounded-lg shadow">Загрузка сохраненных данных факта...</div>';
+                container.innerHTML = '<div class="text-center py-12 text-gray-500 bg-white rounded-lg shadow">Загрузка данных факта...</div>';
 
                 try {
                     const res = await fetch(`/api/fact/report?report_date=${dateVal}&region=${region}`);
                     const data = await res.json();
 
                     let html = `
-                        <div class="bg-white shadow rounded-lg p-6 border-l-4 border-green-500">
+                        <div class="bg-white shadow rounded-lg p-6 border-l-4 border-green-500 mb-6">
                             <div class="flex justify-between items-center mb-4">
                                 <h3 class="font-bold text-gray-800 text-lg">👶 Фактическое присутствие детей на ${data.date}</h3>
                                 <span class="text-xs bg-purple-100 text-purple-800 font-bold px-3 py-1 rounded-full">${data.menu_num ? 'Меню № ' + data.menu_num : 'Выходной / Нет меню'}</span>
@@ -581,6 +617,56 @@ def get_dashboard():
                     container.innerHTML = html;
                 } catch (err) {
                     container.innerHTML = '<div class="text-center py-12 text-red-500 bg-white rounded-lg shadow">Ошибка загрузки данных факта.</div>';
+                }
+            }
+
+            async function loadBalanceData() {
+                const dateVal = document.getElementById('balanceDate').value;
+                const region = document.getElementById('balanceRegionSelect').value;
+                const container = document.getElementById('balanceContainer');
+                container.innerHTML = '<div class="text-center py-12 text-gray-500 bg-white rounded-lg shadow">Расчет актуальных остатков по МТТ...</div>';
+
+                try {
+                    const res = await fetch(`/api/balance/report?report_date=${dateVal}&region=${region}`);
+                    const data = await res.json();
+
+                    let html = `
+                        <div class="bg-white shadow rounded-lg overflow-hidden">
+                            <div class="bg-gray-50 px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+                                <h3 class="text-lg font-bold text-gray-800">📦 Остатки на ${data.date} (Регион: ${data.region})</h3>
+                                <span class="text-xs text-gray-500 bg-gray-200 px-3 py-1 rounded">Инв. база: ${data.inv_date ? data.inv_date : 'Нет актов'}</span>
+                            </div>
+                            <div class="overflow-x-auto" style="max-height: 700px;">
+                                <table class="min-w-full divide-y divide-gray-200 text-xs border-collapse">
+                                    <thead class="bg-gray-100 sticky top-0 z-10">
+                                        <tr>
+                                            <th class="px-4 py-3 text-left font-bold text-gray-700 border-r bg-gray-100 sticky left-0 z-20 min-w-[180px]">Продукт</th>
+                                            <th class="px-3 py-3 text-center font-bold text-gray-700 border-r bg-gray-100 min-w-[70px]">Ед.</th>
+                    `;
+
+                    data.points.forEach(p => {
+                        html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]">${p.name}<br><span class="text-[10px] text-indigo-600">(${p.children_count} дет)</span></th>`;
+                    });
+
+                    html += `<th class="px-4 py-3 text-center font-bold text-indigo-800 bg-indigo-50">ИТОГО ОСТАТОК</th></tr></thead><tbody class="divide-y divide-gray-200 bg-white">`;
+
+                    for (const [prodName, rowData] of Object.entries(data.balance_report)) {
+                        html += `
+                            <tr class="hover:bg-gray-50">
+                                <td class="px-4 py-3 font-medium text-gray-900 border-r bg-white sticky left-0 z-10">${prodName}</td>
+                                <td class="px-3 py-3 text-center text-gray-500 border-r bg-gray-50">${rowData.unit}</td>
+                        `;
+                        data.points.forEach(p => {
+                            const val = rowData.points_balance[p.id] || 0;
+                            html += `<td class="px-3 py-3 text-center border-r font-bold ${val > 0 ? 'text-indigo-600' : 'text-red-500'}">${val}</td>`;
+                        });
+                        html += `<td class="px-4 py-3 text-center font-bold text-indigo-900 bg-indigo-50">${rowData.total_balance}</td></tr>`;
+                    }
+
+                    html += `</tbody></table></div></div>`;
+                    container.innerHTML = html;
+                } catch (err) {
+                    container.innerHTML = '<div class="text-center py-12 text-red-500 bg-white rounded-lg shadow">Ошибка загрузки остатков.</div>';
                 }
             }
 
@@ -802,6 +888,118 @@ def get_fact_report(report_date: str, region: str = "Город"):
   }
 
 
+@app.get("/api/balance/report")
+def get_balance_report(report_date: str, region: str = "Город"):
+  try:
+    parsed_date = date.fromisoformat(report_date)
+  except Exception:
+    parsed_date = date.today()
+
+  points_dict = load_points_from_excel(region)
+  points_list = [
+      {
+          "id": pid,
+          "name": pinfo["name"],
+          "children_count": pinfo["children_count"],
+      }
+      for pid, pinfo in points_dict.items()
+  ]
+
+  fact_storage = load_fact_children_settings()
+  stock_storage = load_stock_settings()
+
+  available_inv_dates = sorted(
+      [d for d in stock_storage.keys() if d <= report_date]
+  )
+  inv_date_used = None
+  initial_stock = {}
+  if available_inv_dates:
+    inv_date_used = available_inv_dates[-1]
+    initial_stock = stock_storage[inv_date_used].get(region, {})
+
+  purchases_storage = load_purchases_settings().get(region, {})
+  purchases_between = {}
+  inv_dt = (
+      date.fromisoformat(inv_date_used) if inv_date_used else date(2000, 1, 1)
+  )
+
+  for pid, p_list in purchases_storage.items():
+    for p in p_list:
+      p_date = p.get("date")
+      if p_date and inv_dt <= date.fromisoformat(p_date) <= parsed_date:
+        if pid not in purchases_between:
+          purchases_between[pid] = {}
+        prod = p.get("product")
+        purchases_between[pid][prod] = (
+            purchases_between[pid].get(prod, 0.0) + p.get("qty", 0.0)
+        )
+
+  consumed_between = {}
+  if inv_date_used:
+    inv_dt_real = date.fromisoformat(inv_date_used)
+    if inv_dt_real <= parsed_date:
+      curr_d = inv_dt_real
+      while curr_d <= parsed_date:
+        m_num = get_menu_number_for_date_custom(curr_d)
+        if m_num is not None:
+          day_menu = load_menu_from_excel(m_num)
+          day_fact_children = (
+              fact_storage.get(curr_d.isoformat(), {}).get(region, {})
+          )
+          for pid, pinfo in points_dict.items():
+            child_cnt = day_fact_children.get(str(pid))
+            if child_cnt is None:
+              child_cnt = day_fact_children.get(pid, pinfo["children_count"])
+            else:
+              child_cnt = int(child_cnt)
+
+            if pid not in consumed_between:
+              consumed_between[pid] = {}
+            for prod_name, pdata in day_menu.items():
+              consumed_between[pid][prod_name] = consumed_between[pid].get(
+                  prod_name, 0.0
+              ) + (pdata.get("qty_per_child", 0.0) * child_cnt)
+        curr_d += timedelta(days=1)
+
+  balance_report = {}
+  all_products_set = set(get_all_products_with_units().keys())
+
+  for prod_name in sorted(all_products_set):
+    unit = "кг"
+    for i in range(1, 11):
+      m_items = load_menu_from_excel(i)
+      if prod_name in m_items:
+        unit = m_items[prod_name]["unit"]
+        break
+
+    points_balance = {}
+    prod_total_balance = 0.0
+
+    for pid in points_dict.keys():
+      p_init = initial_stock.get(str(pid), {}).get(prod_name, 0.0)
+      p_purch = purchases_between.get(pid, {}).get(prod_name, 0.0)
+      p_cons = consumed_between.get(pid, {}).get(prod_name, 0.0)
+
+      bal = (p_init + p_purch) - p_cons
+      bal_rounded = round(max(0.0, bal), 2)
+      points_balance[pid] = bal_rounded
+      prod_total_balance += bal_rounded
+
+    balance_report[prod_name] = {
+        "unit": unit,
+        "points_balance": points_balance,
+        "total_balance": round(prod_total_balance, 2),
+    }
+
+  return {
+      "date": report_date,
+      "region": region,
+      "inv_date": inv_date_used,
+      "points": points_list,
+      "balance_report": balance_report,
+  }
+
+
 @app.post("/api/fact/children")
 def save_fact_children_api(data: dict, report_date: str, region: str = "Город"):
   storage = load_fact_children_settings()
@@ -819,29 +1017,17 @@ def export_fact_excel(report_date: str, region: str = "Город"):
   except Exception:
     parsed_date = date.today()
 
+  report_data = get_fact_report(report_date, region)
   points_dict = load_points_from_excel(region)
-  fact_storage = load_fact_children_settings()
-  saved_fact_children = fact_storage.get(report_date, {}).get(region, {})
-  menu_num = get_menu_number_for_date_custom(parsed_date)
 
   rows_data = []
-  if menu_num is not None:
-    menu_items = load_menu_from_excel(menu_num)
-    for prod_name, pdata in menu_items.items():
-      kg_per_child = pdata.get("qty_per_child", 0.0)
-      unit = pdata.get("unit", "кг")
-
-      row = {"Продукт": prod_name, "Ед. изм.": unit}
-      total_prod = 0.0
-      for pid, pinfo in points_dict.items():
-        child_cnt = saved_fact_children.get(
-            str(pid), saved_fact_children.get(pid, pinfo["children_count"])
-        )
-        q = round(int(child_cnt) * kg_per_child, 2)
-        row[pinfo["name"]] = q
-        total_prod += q
-      row["ИТОГО ФАКТ"] = round(total_prod, 2)
-      rows_data.append(row)
+  fact_cons = report_data.get("fact_consumption", {})
+  for prod_name, pdata in fact_cons.items():
+    row = {"Продукт": prod_name, "Ед. изм.": pdata["unit"]}
+    for pid, pinfo in points_dict.items():
+      row[pinfo["name"]] = pdata["points_qty"].get(pid, 0.0)
+    row["ИТОГО ФАКТ"] = pdata["total_fact"]
+    rows_data.append(row)
 
   df = pd.DataFrame(rows_data)
   if df.empty:
@@ -945,7 +1131,6 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
       for pid, pinfo in points_dict.items()
   ]
 
-  # 1. Инвентаризация
   stock_storage = load_stock_settings()
   available_inv_dates = sorted(
       [d for d in stock_storage.keys() if d <= start_of_week.isoformat()]
@@ -956,7 +1141,6 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
     inv_date_used = available_inv_dates[-1]
     initial_stock = stock_storage[inv_date_used].get(region, {})
 
-  # 2. Автоматические приходы от MUXSIN-FAYZ
   purchases_storage = load_purchases_settings().get(region, {})
   purchases_between = {}
 
@@ -976,7 +1160,6 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
             purchases_between[pid].get(prod, 0.0) + p.get("qty", 0.0)
         )
 
-  # 3. Расход за прошлые дни
   consumed_between = {}
   if inv_date_used:
     inv_dt_real = date.fromisoformat(inv_date_used)
@@ -996,7 +1179,6 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
               ) + (pdata.get("qty_per_child", 0.0) * children)
         curr_d += timedelta(days=1)
 
-  # 4. Эффективный остаток на начало недели
   effective_stock = {}
   for pid in points_dict.keys():
     effective_stock[pid] = {}
@@ -1013,7 +1195,6 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
       net_stock = (init_val + purch_val) - cons_val
       effective_stock[pid][prod] = max(0.0, net_stock)
 
-  # 5. Валовая потребность недели
   matrix_data = {}
   working_days_count = 0
   for day in week_days:
@@ -1036,7 +1217,6 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
           }
         matrix_data[prod_name]["points_qty"][point_id] += needed
 
-  # 6. Расчет чистой потребности (Нетто)
   for prod_name, prod_info in matrix_data.items():
     weekly_sum = 0.0
     for pid in points_dict.keys():
