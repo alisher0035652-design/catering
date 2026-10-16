@@ -679,31 +679,32 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
     inv_date_used = available_inv_dates[-1]
     initial_stock = stock_storage[inv_date_used].get(region, {})
 
-  # 2. Автоматические приходы от MUXSIN-FAYZ
+  # 2. Автоматические приходы от MUXSIN-FAYZ (учитываем даже при отсутствии акта инвентаризации)
   purchases_storage = load_purchases_settings().get(region, {})
   purchases_between = {}  # { point_id: { prod: qty } }
 
-  if inv_date_used:
-    inv_dt = date.fromisoformat(inv_date_used)
-    end_prev_period = start_of_week - timedelta(days=1)
-    for pid, p_list in purchases_storage.items():
-      for p in p_list:
-        p_date = p.get("date")
-        if p_date and inv_dt <= date.fromisoformat(p_date) <= end_prev_period:
-          if pid not in purchases_between:
-            purchases_between[pid] = {}
-          prod = p.get("product")
-          purchases_between[pid][prod] = (
-              purchases_between[pid].get(prod, 0.0) + p.get("qty", 0.0)
-          )
+  inv_dt = (
+      date.fromisoformat(inv_date_used) if inv_date_used else date(2000, 1, 1)
+  )
+  end_prev_period = start_of_week - timedelta(days=1)
+
+  for pid, p_list in purchases_storage.items():
+    for p in p_list:
+      p_date = p.get("date")
+      if p_date and inv_dt <= date.fromisoformat(p_date) <= end_prev_period:
+        if pid not in purchases_between:
+          purchases_between[pid] = {}
+        prod = p.get("product")
+        purchases_between[pid][prod] = (
+            purchases_between[pid].get(prod, 0.0) + p.get("qty", 0.0)
+        )
 
   # 3. Расход за прошлые дни
   consumed_between = {}
   if inv_date_used:
-    inv_dt = date.fromisoformat(inv_date_used)
-    if inv_dt < start_of_week:
-      curr_d = inv_dt
-      end_prev_period = start_of_week - timedelta(days=1)
+    inv_dt_real = date.fromisoformat(inv_date_used)
+    if inv_dt_real < start_of_week:
+      curr_d = inv_dt_real
       while curr_d <= end_prev_period:
         menu_num = get_menu_number_for_date_custom(curr_d)
         if menu_num is not None:
@@ -758,12 +759,17 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
           }
         matrix_data[prod_name]["points_qty"][point_id] += needed
 
-  # 6. Расчет чистой потребности (Нетто)
+  # 6. Расчет чистой потребности (Нетто) с точным сравнением имен продуктов
   for prod_name, prod_info in matrix_data.items():
     weekly_sum = 0.0
     for pid in points_dict.keys():
       gross_qty = prod_info["points_qty"][pid]
-      stock_at_start = effective_stock.get(pid, {}).get(prod_name, 0.0)
+      stock_at_start = 0.0
+      p_stocks = effective_stock.get(pid, {})
+      for st_prod, st_qty in p_stocks.items():
+        if st_prod.strip().lower() == prod_name.strip().lower():
+          stock_at_start += st_qty
+
       net_qty = max(0.0, gross_qty - stock_at_start)
       prod_info["points_qty"][pid] = round(net_qty, 2)
       weekly_sum += net_qty
