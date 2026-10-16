@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 import json
 import os
+import re
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 import pandas as pd
@@ -63,14 +64,14 @@ def save_stock_settings(settings: dict):
 def load_purchases_settings() -> dict:
   """Автоматически подтягивает отгрузки организации 'MUXSIN-FAYZ' из базы данных
 
-  и конвертирует их в приходы продуктов по точкам МТТ.
+  и точно сопоставляет их с точками МТТ по номеру клиента.
   """
   purchases_by_region = {"Город": {}, "Район": {}}
   try:
     conn = get_db_connection()
     cursor = conn.cursor()
     query = """
-            SELECT d.date, c.category, c.client_number, i.name as product_name, si.quantity
+            SELECT d.date, c.id as client_id, c.category, c.client_number, i.name as product_name, si.quantity
             FROM sales_docs d
             JOIN clients c ON d.client_id = c.id
             JOIN sales_items si ON si.doc_id = d.id
@@ -82,6 +83,9 @@ def load_purchases_settings() -> dict:
     cursor.close()
     conn.close()
 
+    points_gorod = load_points_from_excel("Город")
+    points_rayon = load_points_from_excel("Район")
+
     for r in rows:
       date_str = str(r["date"]).split("T")[0] if r["date"] else ""
       category = str(r["category"]).strip().lower()
@@ -89,10 +93,15 @@ def load_purchases_settings() -> dict:
           "Город" if "город" in category or "текущие" in category else "Район"
       )
 
-      points_dict = load_points_from_excel(region)
+      points_dict = points_gorod if region == "Город" else points_rayon
       target_point_id = None
+      db_client_num = int(r["client_number"])
+
+      # Точное сопоставление номера МТТ с использованием регулярных выражений
       for pid, pinfo in points_dict.items():
-        if str(r["client_number"]) in str(pinfo["name"]):
+        name_str = pinfo["name"]
+        numbers_in_name = re.findall(r"\d+", name_str)
+        if numbers_in_name and int(numbers_in_name[0]) == db_client_num:
           target_point_id = pid
           break
 
