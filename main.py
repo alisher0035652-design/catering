@@ -705,7 +705,8 @@ def get_dashboard():
                     `;
 
                     data.points.forEach(p => {
-                        html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]">${p.name}<br><span class="text-[10px] text-indigo-600">(${p.children_count} дет)</span></th>`;
+                        const countDisplay = p.is_saved ? `${p.children_count} дет` : `<span class="text-red-600 font-extrabold text-sm" title="Факт не сохранен (План)">П</span>`;
+                        html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]">${p.name}<br><span class="text-[10px] text-indigo-600">(${countDisplay})</span></th>`;
                     });
 
                     html += `<th class="px-4 py-3 text-center font-bold text-indigo-800 bg-indigo-50">ИТОГО ОСТАТОК</th></tr></thead><tbody class="divide-y divide-gray-200 bg-white">`;
@@ -718,7 +719,6 @@ def get_dashboard():
                         `;
                         data.points.forEach(p => {
                             const val = rowData.points_balance[p.id] || 0;
-                            // Отрицательные значения выделяем красным цветом
                             const colorClass = val < 0 ? 'text-red-600 font-extrabold bg-red-50' : (val > 0 ? 'text-indigo-600 font-bold' : 'text-gray-400');
                             html += `<td class="px-3 py-3 text-center border-r ${colorClass}">${val}</td>`;
                         });
@@ -901,17 +901,22 @@ def get_fact_report(report_date: str, region: str = "Город"):
     parsed_date = date.today()
 
   points_dict = load_points_from_excel(region)
-  points_list = [
-      {
-          "id": pid,
-          "name": pinfo["name"],
-          "default_children": pinfo["children_count"],
-      }
-      for pid, pinfo in points_dict.items()
-  ]
-
   fact_storage = load_fact_children_settings()
   saved_fact_children = fact_storage.get(report_date, {}).get(region, {})
+
+  points_list = []
+  for pid, pinfo in points_dict.items():
+    child_cnt = saved_fact_children.get(str(pid))
+    if child_cnt is None:
+      child_cnt = saved_fact_children.get(pid, pinfo["children_count"])
+    else:
+      child_cnt = int(child_cnt)
+
+    points_list.append({
+        "id": pid,
+        "name": pinfo["name"],
+        "default_children": child_cnt,
+    })
 
   menu_num = get_menu_number_for_date_custom(parsed_date)
   fact_consumption = {}
@@ -924,13 +929,9 @@ def get_fact_report(report_date: str, region: str = "Город"):
 
       points_qty = {}
       row_sum = 0.0
-      for pid, pinfo in points_dict.items():
-        child_cnt = saved_fact_children.get(str(pid))
-        if child_cnt is None:
-          child_cnt = pinfo["children_count"]
-        else:
-          child_cnt = int(child_cnt)
-
+      for p in points_list:
+        pid = p["id"]
+        child_cnt = p["default_children"]
         qty = round(child_cnt * kg_per_child, 2)
         points_qty[pid] = qty
         row_sum += qty
@@ -969,17 +970,33 @@ def get_balance_report(report_date: str, region: str = "Город"):
     parsed_date = date.today()
 
   points_dict = load_points_from_excel(region)
-  points_list = [
-      {
-          "id": pid,
-          "name": pinfo["name"],
-          "children_count": pinfo["children_count"],
-      }
-      for pid, pinfo in points_dict.items()
-  ]
-
   fact_storage = load_fact_children_settings()
   stock_storage = load_stock_settings()
+
+  saved_fact_children_target = (
+      fact_storage.get(report_date, {}).get(region, {})
+  )
+  points_list = []
+  for pid, pinfo in points_dict.items():
+    # Проверяем, сохранен ли факт именно для этой точки на запрашиваемую дату
+    is_saved = (str(pid) in saved_fact_children_target) or (
+        pid in saved_fact_children_target
+    )
+    if is_saved:
+      c_cnt = int(
+          saved_fact_children_target.get(
+              str(pid), saved_fact_children_target.get(pid)
+          )
+      )
+    else:
+      c_cnt = pinfo["children_count"]  # fallback для расчета расхода
+
+    points_list.append({
+        "id": pid,
+        "name": pinfo["name"],
+        "children_count": c_cnt,
+        "is_saved": is_saved,
+    })
 
   available_inv_dates = sorted(
       [d for d in stock_storage.keys() if d <= report_date]
@@ -1074,7 +1091,6 @@ def get_balance_report(report_date: str, region: str = "Город"):
           else float(p_cons or 0.0)
       )
 
-      # Убрали max(0.0, ...) чтобы остатки могли уходить в минус
       bal = (init_val + purch_val) - cons_val
       bal_rounded = round(bal, 2)
       points_balance[pid] = bal_rounded
