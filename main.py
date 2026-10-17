@@ -11,10 +11,6 @@ import psycopg2.extras
 
 app = FastAPI(title="Catering Management API", version="1.0.0")
 
-SETTINGS_FILE = "calendar_settings.json"
-STOCK_FILE = "stock_settings.json"
-FACT_CHILDREN_FILE = "fact_children_settings.json"
-
 _MENU_CACHE = {}
 
 
@@ -35,49 +31,191 @@ def get_db_connection():
   return conn
 
 
+def init_db():
+  conn = get_db_connection()
+  cursor = conn.cursor()
+  # Таблица для календаря (настройки дней)
+  cursor.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            date_str VARCHAR(20) PRIMARY KEY,
+            data JSONB
+        );
+    """)
+  # Таблица для актов инвентаризации склада
+  cursor.execute("""
+        CREATE TABLE IF NOT EXISTS stock_acts (
+            date_str VARCHAR(20),
+            region VARCHAR(50),
+            data JSONB,
+            PRIMARY KEY (date_str, region)
+        );
+    """)
+  # Таблица для фактического присутствия детей
+  cursor.execute("""
+        CREATE TABLE IF NOT EXISTS fact_children (
+            date_str VARCHAR(20),
+            region VARCHAR(50),
+            data JSONB,
+            PRIMARY KEY (date_str, region)
+        );
+    """)
+  conn.commit()
+  cursor.close()
+  conn.close()
+
+
+@app.on_event("startup")
+def startup_event():
+  init_db()
+
+
+# --- Функции работы с БД для Настроек Календаря ---
 def load_manual_settings() -> dict:
-  if os.path.exists(SETTINGS_FILE):
-    try:
-      with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-    except Exception:
-      return {}
+  try:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT data FROM app_settings WHERE date_str = 'calendar_config'"
+    )
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    if row:
+      return row["data"] if isinstance(row["data"], dict) else json.loads(row["data"])
+  except Exception as e:
+    print(f"Ошибка загрузки календаря из БД: {e}")
   return {"days": {}}
 
 
 def save_manual_settings(settings: dict):
-  with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-    json.dump(settings, f, ensure_ascii=False, indent=4)
+  try:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    json_val = json.dumps(settings, ensure_ascii=False)
+    cursor.execute(
+        """
+            INSERT INTO app_settings (date_str, data) VALUES ('calendar_config', %s)
+            ON CONFLICT (date_str) DO UPDATE SET data = EXCLUDED.data;
+        """,
+        (json_val,),
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+  except Exception as e:
+    print(f"Ошибка сохранения календаря в БД: {e}")
 
 
+# --- Функции работы с БД для Инвентаризации ---
 def load_stock_settings() -> dict:
-  if os.path.exists(STOCK_FILE):
-    try:
-      with open(STOCK_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-    except Exception:
-      return {}
-  return {}
+  stock_map = {}
+  try:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT date_str, region, data FROM stock_acts;")
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    for r in rows:
+      d = r["date_str"]
+      reg = r["region"]
+      val = r["data"] if isinstance(r["data"], dict) else json.loads(r["data"])
+      if d not in stock_map:
+        stock_map[d] = {}
+      stock_map[d][reg] = val
+  except Exception as e:
+    print(f"Ошибка загрузки инвентаризации из БД: {e}")
+  return stock_map
 
 
-def save_stock_settings(settings: dict):
-  with open(STOCK_FILE, "w", encoding="utf-8") as f:
-    json.dump(settings, f, ensure_ascii=False, indent=4)
+def save_stock_settings_for_date(date_str: str, region: str, data: dict):
+  try:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    json_val = json.dumps(data, ensure_ascii=False)
+    cursor.execute(
+        """
+            INSERT INTO stock_acts (date_str, region, data) VALUES (%s, %s, %s)
+            ON CONFLICT (date_str, region) DO UPDATE SET data = EXCLUDED.data;
+        """,
+        (date_str, region, json_val),
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+  except Exception as e:
+    print(f"Ошибка сохранения инвентаризации в БД: {e}")
 
 
+def delete_stock_settings_for_date(date_str: str, region: str):
+  try:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "DELETE FROM stock_acts WHERE date_str = %s AND region = %s;",
+        (date_str, region),
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+  except Exception as e:
+    print(f"Ошибка удаления инвентаризации из БД: {e}")
+
+
+# --- Функции работы с БД для Факта Детей ---
 def load_fact_children_settings() -> dict:
-  if os.path.exists(FACT_CHILDREN_FILE):
-    try:
-      with open(FACT_CHILDREN_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-    except Exception:
-      return {}
-  return {}
+  fact_map = {}
+  try:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT date_str, region, data FROM fact_children;")
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    for r in rows:
+      d = r["date_str"]
+      reg = r["region"]
+      val = r["data"] if isinstance(r["data"], dict) else json.loads(r["data"])
+      if d not in fact_map:
+        fact_map[d] = {}
+      fact_map[d][reg] = val
+  except Exception as e:
+    print(f"Ошибка загрузки факта детей из БД: {e}")
+  return fact_map
 
 
-def save_fact_children_settings(settings: dict):
-  with open(FACT_CHILDREN_FILE, "w", encoding="utf-8") as f:
-    json.dump(settings, f, ensure_ascii=False, indent=4)
+def save_fact_children_for_date(date_str: str, region: str, data: dict):
+  try:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    json_val = json.dumps(data, ensure_ascii=False)
+    cursor.execute(
+        """
+            INSERT INTO fact_children (date_str, region, data) VALUES (%s, %s, %s)
+            ON CONFLICT (date_str, region) DO UPDATE SET data = EXCLUDED.data;
+        """,
+        (date_str, region, json_val),
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+  except Exception as e:
+    print(f"Ошибка сохранения факта детей в БД: {e}")
+
+
+def delete_fact_children_for_date(date_str: str, region: str):
+  try:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "DELETE FROM fact_children WHERE date_str = %s AND region = %s;",
+        (date_str, region),
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+  except Exception as e:
+    print(f"Ошибка удаления факта детей из БД: {e}")
 
 
 def load_purchases_settings() -> dict:
@@ -1200,22 +1338,13 @@ def get_balance_report(report_date: str, region: str = "Город"):
 
 @app.post("/api/fact/children")
 def save_fact_children_api(data: dict, report_date: str, region: str = "Город"):
-  storage = load_fact_children_settings()
-  if report_date not in storage:
-    storage[report_date] = {}
-  storage[report_date][region] = data
-  save_fact_children_settings(storage)
+  save_fact_children_for_date(report_date, region, data)
   return {"status": "success"}
 
 
 @app.delete("/api/fact/children")
 def delete_fact_children_api(report_date: str, region: str = "Город"):
-  storage = load_fact_children_settings()
-  if report_date in storage and region in storage[report_date]:
-    del storage[report_date][region]
-    if not storage[report_date]:
-      del storage[report_date]
-    save_fact_children_settings(storage)
+  delete_fact_children_for_date(report_date, region)
   return {"status": "success"}
 
 
@@ -1288,22 +1417,13 @@ def get_stock_matrix_api(region: str, date: str = None):
 
 @app.post("/api/stock/matrix/{region}")
 def save_stock_matrix_api(region: str, data: dict, date: str = "2026-10-01"):
-  stock_storage = load_stock_settings()
-  if date not in stock_storage:
-    stock_storage[date] = {}
-  stock_storage[date][region] = data
-  save_stock_settings(stock_storage)
+  save_stock_settings_for_date(date, region, data)
   return {"status": "success"}
 
 
 @app.delete("/api/stock/matrix/{region}")
 def delete_stock_matrix_api(date: str, region: str):
-  stock_storage = load_stock_settings()
-  if date in stock_storage and region in stock_storage[date]:
-    del stock_storage[date][region]
-    if not stock_storage[date]:
-      del stock_storage[date]
-    save_stock_settings(stock_storage)
+  delete_stock_settings_for_date(date, region)
   return {"status": "success"}
 
 
