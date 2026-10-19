@@ -504,7 +504,7 @@ def generate_menu_pdf_for_point(
     return final_pdf_path
   else:
     return temp_pdf_path
-    def send_pdf_to_telegram(pdf_path: str, caption: str):
+def send_pdf_to_telegram(pdf_path: str, caption: str):
   if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
     print("Не заданы TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID")
     return None
