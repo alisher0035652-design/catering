@@ -414,6 +414,7 @@ def get_all_products_with_units() -> dict:
 
 # --- Генерация PDF по шаблону Menu shablon.xlsx с 3 штампами/подписями ---
 # --- ИСПРАВЛЕННАЯ ФУНКЦИЯ ГЕНЕРАЦИИ PDF ---
+# --- ИСПРАВЛЕННАЯ ФУНКЦИЯ ГЕНЕРАЦИИ PDF ---
 def generate_menu_pdf_for_point(
     report_date_str: str,
     region: str,
@@ -426,25 +427,32 @@ def generate_menu_pdf_for_point(
   if not os.path.exists(template_path):
     raise FileNotFoundError("Шаблон Menu shablon.xlsx не найден")
 
+  # Формат даты ДД.ММ.ГГГГ (например, 19.10.2026)
+  try:
+    d_obj = date.fromisoformat(report_date_str)
+    formatted_date = d_obj.strftime("%d.%m.%Y")
+  except Exception:
+    formatted_date = report_date_str
+
   wb = openpyxl.load_workbook(template_path)
   target_sheet_name = str(menu_num)
 
   if target_sheet_name not in wb.sheetnames:
     raise ValueError(f"Лист меню {target_sheet_name} не найден в шаблоне")
 
-  # 1. УДАЛЯЕМ ВСЕ ЛИШНИЕ ЛИСТЫ, оставляем только нужный (например, '3')
+  # Удаляем все лишние листы, оставляем только нужный по календарю день меню
   for sheetname in wb.sheetnames:
     if sheetname != target_sheet_name:
       del wb[sheetname]
 
   ws = wb[target_sheet_name]
 
-  # 2. ЗАПОЛНЯЕМ ДАННЫЕ В ЯЧЕЙКИ
-  ws["A1"] = report_date_str  # Дата (19.10.2026)
-  ws["A4"] = children_count  # Количество детей
-  ws["F1"] = point_name  # Номер МТТ (например, 1-МТТ)
+  # Заполняем данные
+  ws["A1"] = formatted_date  # Дата в формате ДД.ММ.ГГГГ
+  ws["A4"] = children_count  # Кол-во детей
+  ws["F1"] = point_name  # Номер МТТ
 
-  # 3. НАСТРАИВАЕМ ПРИНУДИТЕЛЬНУЮ ПОДГОНКУ ПОД 1 СТРАНИЦУ A4 (LANDSCAPE)
+  # Принудительная подгонка под 1 страницу A4 Landscape
   ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
   ws.page_setup.paperSize = ws.PAPERSIZE_A4
   ws.page_setup.fitToWidth = 1
@@ -458,7 +466,7 @@ def generate_menu_pdf_for_point(
   wb.save(temp_excel_path)
   wb.close()
 
-  # 4. КОНВЕРТАЦИЯ В PDF ЧЕРЕЗ LIBREOFFICE
+  # Конвертация в PDF через LibreOffice
   subprocess.run(
       [
           "libreoffice",
@@ -474,7 +482,7 @@ def generate_menu_pdf_for_point(
 
   stamp1_path = "stamp_1.png"  # Подпись технолога
   stamp2_path = "stamp_2.png"  # Круглая печать
-  stamp3_path = "stamp_3.png"  # Подпись директора
+  stamp3_path = "stamp_3.png"  # Подпись Ярманова
 
   if os.path.exists(temp_pdf_path):
     packet = io.BytesIO()
@@ -483,17 +491,19 @@ def generate_menu_pdf_for_point(
     # --- ТОЧНАЯ РАССТАНОВКА ШТАМПОВ И ПОДПИСЕЙ ---
     # Лист A4 landscape = 842 x 595 точек
 
-    # 1. Подпись директора (stamp_3.png) — Вверху справа над черточкой "Р. Ярманов"
+    # 1. Подпись Ярманова (stamp_3.png) — Вверху справа над черточкой Р. Ярманова
     if os.path.exists(stamp3_path):
-      can.drawImage(stamp3_path, 680, 495, width=90, height=45, mask="auto")
+      can.drawImage(stamp3_path, 680, 500, width=90, height=45, mask="auto")
 
-    # 2. Круглая печать (stamp_2.png) — Вверху справа поверх "ТАСДИҚЛАЙМАН"
+    # 2. Круглая печать (stamp_2.png) — Вверху справа поверх ТАСДИҚЛАЙМАН
     if os.path.exists(stamp2_path):
-      can.drawImage(stamp2_path, 640, 475, width=90, height=90, mask="auto")
+      can.drawImage(stamp2_path, 640, 480, width=90, height=90, mask="auto")
 
-    # 3. Подпись технолога (stamp_1.png) — Внизу слева над черточкой у "Технолог"
+    # 3. Подпись технолога (stamp_1.png) — Внизу ровно над черточкой "Технолог"
     if os.path.exists(stamp1_path):
-      can.drawImage(stamp1_path, 210, 35, width=95, height=40, mask="auto")
+      can.drawImage(
+          stamp1_path, 435, 62, width=90, height=38, mask="auto"
+      )  # Скорректировано точно на линию технолога
 
     can.save()
     packet.seek(0)
@@ -509,7 +519,6 @@ def generate_menu_pdf_for_point(
     with open(final_pdf_path, "wb") as f:
       output_pdf.write(f)
 
-    # Удаляем временные промежуточные файлы
     if os.path.exists(temp_excel_path):
       os.remove(temp_excel_path)
     if os.path.exists(temp_pdf_path):
