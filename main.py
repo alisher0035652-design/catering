@@ -416,6 +416,7 @@ def get_all_products_with_units() -> dict:
 # --- Генерация PDF по шаблону Menu shablon.xlsx с 3 штампами/подписями ---
 # --- ИСПРАВЛЕННАЯ ФУНКЦИЯ ГЕНЕРАЦИИ PDF ---
 # --- ИСПРАВЛЕННАЯ ФУНКЦИЯ ГЕНЕРАЦИИ PDF ---
+# --- ТОЧНАЯ ГЕНЕРАЦИЯ PDF И РАССТАНОВКА ШТАМПОВ ЧЕРЕЗ REPORTLAB ---
 def generate_menu_pdf_for_point(
     report_date_str: str,
     region: str,
@@ -453,32 +454,6 @@ def generate_menu_pdf_for_point(
   ws["A4"] = children_count  # Кол-во детей
   ws["F1"] = point_name  # Номер МТТ
 
-  # Внедряем подписи и печати прямо в ячейки Excel
-  stamp1_path = "stamp_1.png"  # Подпись технолога
-  stamp2_path = "stamp_2.png"  # Круглая печать
-  stamp3_path = "stamp_3.png"  # Подпись Ярманова
-
-  # 1. Подпись Ярманова в ячейку V2
-  if os.path.exists(stamp3_path):
-    img3 = Image(stamp3_path)
-    img3.width = 90
-    img3.height = 45
-    ws.add_image(img3, "V2")
-
-  # 2. Круглая печать тоже в район V2 / V3 (или поверх Ярманова)
-  if os.path.exists(stamp2_path):
-    img2 = Image(stamp2_path)
-    img2.width = 85
-    img2.height = 85
-    ws.add_image(img2, "U2")
-
-  # 3. Подпись технолога в ячейку F33 (возле строки Технолог)
-  if os.path.exists(stamp1_path):
-    img1 = Image(stamp1_path)
-    img1.width = 90
-    img1.height = 38
-    ws.add_image(img1, "F33")
-
   # Принудительная подгонка под 1 страницу A4 Landscape
   ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
   ws.page_setup.paperSize = ws.PAPERSIZE_A4
@@ -493,7 +468,7 @@ def generate_menu_pdf_for_point(
   wb.save(temp_excel_path)
   wb.close()
 
-  # Конвертация в PDF через LibreOffice (вместе с картинками в ячейках)
+  # Конвертация в PDF через LibreOffice
   subprocess.run(
       [
           "libreoffice",
@@ -507,20 +482,50 @@ def generate_menu_pdf_for_point(
       check=True,
   )
 
-  # Переименовываем и перемещаем полученный PDF
-  generated_pdf = temp_excel_path.replace(".xlsx", ".pdf")
-  if os.path.exists(generated_pdf):
-    if os.path.exists(final_pdf_path):
-      os.remove(final_pdf_path)
-    os.rename(generated_pdf, final_pdf_path)
+  stamp1_path = "stamp_1.png"  # Подпись технолога (F32)
+  stamp2_path = "stamp_2.png"  # Круглая печать (поверх stamp_3)
+  stamp3_path = "stamp_3.png"  # Подпись Ярманова (V2)
 
-    # Удаляем временный файл Excel
+  if os.path.exists(temp_pdf_path):
+    packet = io.BytesIO()
+    # Стандартный альбомный лист A4 в ReportLab: ширина 842, высота 595
+    can = canvas.Canvas(packet, pagesize=landscape(A4))
+
+    # 1. Подпись Ярманова (stamp_3.png) — в районе ячейки V2 (подпись директора)
+    if os.path.exists(stamp3_path):
+      can.drawImage(stamp3_path, 680, 505, width=100, height=45, mask="auto")
+
+    # 2. Круглая печать (stamp_2.png) — нормального полноценного диаметра, поверх подписи Ярманова
+    if os.path.exists(stamp2_path):
+      can.drawImage(stamp2_path, 630, 470, width=115, height=115, mask="auto")
+
+    # 3. Подпись технолога (stamp_1.png) — в районе ячейки F32 (возле строки "Технолог")
+    if os.path.exists(stamp1_path):
+      can.drawImage(stamp1_path, 435, 75, width=100, height=42, mask="auto")
+
+    can.save()
+    packet.seek(0)
+
+    stamp_pdf = PdfReader(packet)
+    original_pdf = PdfReader(temp_pdf_path)
+    output_pdf = PdfWriter()
+
+    for page in original_pdf.pages:
+      page.merge_page(stamp_pdf.pages[0])
+      output_pdf.add_page(page)
+
+    with open(final_pdf_path, "wb") as f:
+      output_pdf.write(f)
+
+    # Удаление временных файлов
     if os.path.exists(temp_excel_path):
       os.remove(temp_excel_path)
+    if os.path.exists(temp_pdf_path):
+      os.remove(temp_pdf_path)
 
     return final_pdf_path
   else:
-    return temp_excel_path
+    return temp_pdf_path
 def send_pdf_to_telegram(pdf_path: str, caption: str):
   target_chat_id = TELEGRAM_ADMIN_CHAT_ID or TELEGRAM_CHAT_ID
 
