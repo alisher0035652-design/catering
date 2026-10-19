@@ -4,8 +4,9 @@ import json
 import os
 import re
 import subprocess
+import asyncio
 from apscheduler.schedulers.background import BackgroundScheduler
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 import openpyxl
 import pandas as pd
@@ -21,6 +22,7 @@ app = FastAPI(title="Catering Management API", version="1.0.0")
 _MENU_CACHE = {}
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TELEGRAM_ADMIN_CHAT_ID = os.environ.get("TELEGRAM_ADMIN_CHAT_ID", "")  
 
 def get_db_connection():
@@ -76,8 +78,6 @@ scheduler = BackgroundScheduler()
 @app.on_event("startup")
 def startup_event():
   init_db()
-  # Автоматическая утренняя задача удалена.
-  # Теперь меню отправляется исключительно по нажатию кнопки в ERP.
   scheduler.start()
 
 
@@ -412,7 +412,6 @@ def get_all_products_with_units() -> dict:
   return dict(sorted(products.items()))
 
 
-# --- Генерация PDF по шаблону Menu shablon.xlsx ---
 # --- Генерация PDF по шаблону Menu shablon.xlsx с 3 штампами/подписями ---
 def generate_menu_pdf_for_point(
     report_date_str: str,
@@ -433,7 +432,6 @@ def generate_menu_pdf_for_point(
 
   ws = wb[sheet_name]
 
-  # Заполнение ячеек согласно ТЗ
   ws["A1"] = report_date_str  # Дата
   ws["A4"] = children_count  # Кол-во детей
   ws["F1"] = point_name  # Номер МТТ (например 1-МТТ)
@@ -459,7 +457,6 @@ def generate_menu_pdf_for_point(
       check=True,
   )
 
-  # Наложение печатей и подписей (stamp_1, stamp_2, stamp_3)
   stamp1_path = "stamp_1.png"  # Подпись технолога (внизу)
   stamp2_path = "stamp_2.png"  # Печать MUXSIN-FAYZ (вверху поверх stamp_3)
   stamp3_path = "stamp_3.png"  # Подпись Р. Ярманова (вверху)
@@ -468,15 +465,12 @@ def generate_menu_pdf_for_point(
     packet = io.BytesIO()
     can = canvas.Canvas(packet, pagesize=landscape(A4))
 
-    # 1. Подпись Р. Ярманова (stamp_3.png) - верхний правый угол
     if os.path.exists(stamp3_path):
       can.drawImage(stamp3_path, 690, 500, width=100, height=50, mask="auto")
 
-    # 2. Круглая печать (stamp_2.png) - накладывается поверх stamp_3 вверху
     if os.path.exists(stamp2_path):
       can.drawImage(stamp2_path, 660, 485, width=95, height=95, mask="auto")
 
-    # 3. Подпись технолога (stamp_1.png) - внизу у строки "Технолог"
     if os.path.exists(stamp1_path):
       can.drawImage(stamp1_path, 260, 50, width=100, height=45, mask="auto")
 
@@ -494,7 +488,6 @@ def generate_menu_pdf_for_point(
     with open(final_pdf_path, "wb") as f:
       output_pdf.write(f)
 
-    # Удаление временных файлов
     if os.path.exists(temp_excel_path):
       os.remove(temp_excel_path)
     if os.path.exists(temp_pdf_path):
@@ -503,47 +496,54 @@ def generate_menu_pdf_for_point(
     return final_pdf_path
   else:
     return temp_pdf_path
+
+
 def send_pdf_to_telegram(pdf_path: str, caption: str):
-  # Используем личный ID (или TELEGRAM_CHAT_ID, если там прописан ваш личный ID)
   target_chat_id = TELEGRAM_ADMIN_CHAT_ID or TELEGRAM_CHAT_ID
 
   if not TELEGRAM_BOT_TOKEN or not target_chat_id:
-    print("Не заданы TELEGRAM_BOT_TOKEN или TELEGRAM_ADMIN_CHAT_ID")
+    print("❌ ОШИБКА: Не задан TELEGRAM_BOT_TOKEN или TELEGRAM_ADMIN_CHAT_ID")
     return None
 
   url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
-  with open(pdf_path, "rb") as f:
-    files = {"document": f}
-    data = {"chat_id": target_chat_id, "caption": caption}
-    response = requests.post(url, data=data, files=files)
-  return response.json()
+  try:
+    with open(pdf_path, "rb") as f:
+      files = {"document": f}
+      data = {"chat_id": target_chat_id, "caption": caption}
+      response = requests.post(url, data=data, files=files)
 
-def daily_telegram_menu_job():
-  today_str = date.today().isoformat()
-  regions = ["Город", "Район"]
+    res_json = response.json()
+    if not res_json.get("ok"):
+      print(f"❌ ОШИБКА от Telegram API для файла {pdf_path}: {res_json}")
+    else:
+      print(f"✅ Успешно отправлено в Telegram: {pdf_path}")
+    return res_json
+  except Exception as e:
+    print(f"❌ Исключение при отправке в Telegram файла {pdf_path}: {e}")
+    return None
 
-  for region in regions:
-    fact_storage = load_fact_children_settings()
-    saved_fact = fact_storage.get(today_str, {}).get(region, {})
 
-    if not saved_fact:
-      print(f"Нет проводки факта за {today_str} ({region}). Пропуск отправки.")
+# --- Асинхронная фоновая задача для генерации и отправки по очереди ---
+async def process_and_send_menu_in_background(
+    report_date: str, region: str, saved_fact: dict, menu_num: int
+):
+  points_dict = load_points_from_excel(region)
+  print(
+      f"🚀 Старт фоновой генерации для {len(points_dict)} точек в регионе"
+      f" '{region}'..."
+  )
+
+  for pid, pinfo in points_dict.items():
+    child_cnt = saved_fact.get(str(pid), saved_fact.get(pid))
+    if child_cnt is None:
       continue
 
-    menu_num = get_menu_number_for_date_custom(date.today())
-    if not menu_num:
-      print(f"Сегодня {today_str} выходной день. Отправка отменена.")
-      continue
+    p_name = pinfo["name"]
 
-    points_dict = load_points_from_excel(region)
-    for pid, pinfo in points_dict.items():
-      child_cnt = saved_fact.get(str(pid), saved_fact.get(pid))
-      if child_cnt is None:
-        continue
-
-      p_name = pinfo["name"]
+    try:
+      # 1. Генерируем PDF с печатями
       pdf_file = generate_menu_pdf_for_point(
-          report_date_str=today_str,
+          report_date_str=report_date,
           region=region,
           point_id=pid,
           point_name=p_name,
@@ -551,14 +551,24 @@ def daily_telegram_menu_job():
           menu_num=menu_num,
       )
 
+      # 2. Отправляем в Telegram
       caption = (
           f"📋 Официальное меню № {menu_num} для {p_name} ({region})\n📅 Дата:"
-          f" {today_str}\n👶 Детей: {child_cnt}"
+          f" {report_date}\n👶 Детей: {child_cnt}"
       )
       send_pdf_to_telegram(pdf_file, caption)
 
-      if os.path.exists(pdf_file):
+      # 3. Удаляем временный файл
+      if pdf_file and os.path.exists(pdf_file):
         os.remove(pdf_file)
+
+      # 4. Пауза 2 секунды, чтобы бесплатный сервер Render успевал освобождать CPU/RAM
+      await asyncio.sleep(2)
+
+    except Exception as e:
+      print(f"❌ Ошибка при обработке точки {p_name}: {e}")
+
+  print("✅ Все меню успешно сгенерированы и отправлены в фоновом режиме!")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1017,14 +1027,14 @@ def get_dashboard():
             async function sendMenuTelegramManual() {
                 const dateVal = document.getElementById('factDate').value;
                 const region = document.getElementById('factRegionSelect').value;
-                if(!confirm(`Сформировать и отправить официальное меню с печатью за ${dateVal} (${region}) в Telegram?`)) return;
+                if(!confirm(`Запустить отправку официального меню с печатью за ${dateVal} (${region}) в Telegram в фоновом режиме?`)) return;
 
                 const res = await fetch(`/api/menu/generate-and-send?report_date=${dateVal}&region=${region}`, { method: 'POST' });
                 const data = await res.json();
                 if(res.ok) {
-                    alert('Меню успешно отправлено в Telegram группу!');
+                    alert('Процесс отправки запущен! Файлы будут поступать в Telegram по очереди.');
                 } else {
-                    alert('Ошибка: ' + (data.detail || 'Не удалось отправить'));
+                    alert('Ошибка: ' + (data.detail || 'Не удалось запустить отправку'));
                 }
             }
 
@@ -1569,8 +1579,11 @@ def export_fact_excel(report_date: str, region: str = "Город"):
   )
 
 
+# --- Эндпоинт ручного запуска отправки через фоновую задачу ---
 @app.post("/api/menu/generate-and-send")
-def generate_and_send_menu_api(report_date: str, region: str = "Город"):
+def generate_and_send_menu_api(
+    report_date: str, background_tasks: BackgroundTasks, region: str = "Город"
+):
   try:
     parsed_date = date.fromisoformat(report_date)
   except Exception:
@@ -1594,35 +1607,22 @@ def generate_and_send_menu_api(report_date: str, region: str = "Город"):
         status_code=400, detail="На указанную дату по календарю выходной день."
     )
 
-  points_dict = load_points_from_excel(region)
-  sent_files = []
+  # Запуск в фоновом режиме, чтобы UI не зависал
+  background_tasks.add_task(
+      process_and_send_menu_in_background,
+      report_date=report_date,
+      region=region,
+      saved_fact=saved_fact,
+      menu_num=menu_num,
+  )
 
-  for pid, pinfo in points_dict.items():
-    child_cnt = saved_fact.get(str(pid), saved_fact.get(pid))
-    if child_cnt is None:
-      continue
-
-    p_name = pinfo["name"]
-    pdf_file = generate_menu_pdf_for_point(
-        report_date_str=report_date,
-        region=region,
-        point_id=pid,
-        point_name=p_name,
-        children_count=int(child_cnt),
-        menu_num=menu_num,
-    )
-
-    caption = (
-        f"📋 Официальное меню № {menu_num} для {p_name} ({region})\n📅 Дата:"
-        f" {report_date}\n👶 Детей: {child_cnt}"
-    )
-    res = send_pdf_to_telegram(pdf_file, caption)
-    sent_files.append({"point": p_name, "telegram_status": res})
-
-    if os.path.exists(pdf_file):
-      os.remove(pdf_file)
-
-  return {"status": "success", "sent_reports": sent_files}
+  return {
+      "status": "success",
+      "message": (
+          "Процесс отправки запущен в фоновом режиме! Файлы будут поступать в"
+          " Telegram по очереди."
+      ),
+  }
 
 
 @app.get("/api/stock/matrix/{region}")
