@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+from openpyxl.drawing.image import Image
 import io
 import json
 import os
@@ -440,17 +441,43 @@ def generate_menu_pdf_for_point(
   if target_sheet_name not in wb.sheetnames:
     raise ValueError(f"Лист меню {target_sheet_name} не найден в шаблоне")
 
-  # Удаляем все лишние листы, оставляем только нужный по календарю день меню
+  # Удаляем все лишние листы, оставляем только нужный день меню по календарю
   for sheetname in wb.sheetnames:
     if sheetname != target_sheet_name:
       del wb[sheetname]
 
   ws = wb[target_sheet_name]
 
-  # Заполняем данные
+  # Заполняем текстовые данные
   ws["A1"] = formatted_date  # Дата в формате ДД.ММ.ГГГГ
   ws["A4"] = children_count  # Кол-во детей
   ws["F1"] = point_name  # Номер МТТ
+
+  # Внедряем подписи и печати прямо в ячейки Excel
+  stamp1_path = "stamp_1.png"  # Подпись технолога
+  stamp2_path = "stamp_2.png"  # Круглая печать
+  stamp3_path = "stamp_3.png"  # Подпись Ярманова
+
+  # 1. Подпись Ярманова в ячейку V2
+  if os.path.exists(stamp3_path):
+    img3 = Image(stamp3_path)
+    img3.width = 90
+    img3.height = 45
+    ws.add_image(img3, "V2")
+
+  # 2. Круглая печать тоже в район V2 / V3 (или поверх Ярманова)
+  if os.path.exists(stamp2_path):
+    img2 = Image(stamp2_path)
+    img2.width = 85
+    img2.height = 85
+    ws.add_image(img2, "U2")
+
+  # 3. Подпись технолога в ячейку F33 (возле строки Технолог)
+  if os.path.exists(stamp1_path):
+    img1 = Image(stamp1_path)
+    img1.width = 90
+    img1.height = 38
+    ws.add_image(img1, "F33")
 
   # Принудительная подгонка под 1 страницу A4 Landscape
   ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
@@ -466,7 +493,7 @@ def generate_menu_pdf_for_point(
   wb.save(temp_excel_path)
   wb.close()
 
-  # Конвертация в PDF через LibreOffice
+  # Конвертация в PDF через LibreOffice (вместе с картинками в ячейках)
   subprocess.run(
       [
           "libreoffice",
@@ -480,54 +507,20 @@ def generate_menu_pdf_for_point(
       check=True,
   )
 
-  stamp1_path = "stamp_1.png"  # Подпись технолога
-  stamp2_path = "stamp_2.png"  # Круглая печать
-  stamp3_path = "stamp_3.png"  # Подпись Ярманова
+  # Переименовываем и перемещаем полученный PDF
+  generated_pdf = temp_excel_path.replace(".xlsx", ".pdf")
+  if os.path.exists(generated_pdf):
+    if os.path.exists(final_pdf_path):
+      os.remove(final_pdf_path)
+    os.rename(generated_pdf, final_pdf_path)
 
-  if os.path.exists(temp_pdf_path):
-    packet = io.BytesIO()
-    can = canvas.Canvas(packet, pagesize=landscape(A4))
-
-    # --- ТОЧНАЯ РАССТАНОВКА ШТАМПОВ И ПОДПИСЕЙ ---
-    # Лист A4 landscape = 842 x 595 точек
-
-    # 1. Подпись Ярманова (stamp_3.png) — Вверху справа над черточкой Р. Ярманова
-    if os.path.exists(stamp3_path):
-      can.drawImage(stamp3_path, 680, 500, width=90, height=45, mask="auto")
-
-    # 2. Круглая печать (stamp_2.png) — Вверху справа поверх ТАСДИҚЛАЙМАН
-    if os.path.exists(stamp2_path):
-      can.drawImage(stamp2_path, 640, 480, width=90, height=90, mask="auto")
-
-    # 3. Подпись технолога (stamp_1.png) — Внизу ровно над черточкой "Технолог"
-    if os.path.exists(stamp1_path):
-      can.drawImage(
-          stamp1_path, 435, 62, width=90, height=38, mask="auto"
-      )  # Скорректировано точно на линию технолога
-
-    can.save()
-    packet.seek(0)
-
-    stamp_pdf = PdfReader(packet)
-    original_pdf = PdfReader(temp_pdf_path)
-    output_pdf = PdfWriter()
-
-    for page in original_pdf.pages:
-      page.merge_page(stamp_pdf.pages[0])
-      output_pdf.add_page(page)
-
-    with open(final_pdf_path, "wb") as f:
-      output_pdf.write(f)
-
+    # Удаляем временный файл Excel
     if os.path.exists(temp_excel_path):
       os.remove(temp_excel_path)
-    if os.path.exists(temp_pdf_path):
-      os.remove(temp_pdf_path)
 
     return final_pdf_path
   else:
-    return temp_pdf_path
-
+    return temp_excel_path
 def send_pdf_to_telegram(pdf_path: str, caption: str):
   target_chat_id = TELEGRAM_ADMIN_CHAT_ID or TELEGRAM_CHAT_ID
 
