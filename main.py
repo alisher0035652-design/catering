@@ -74,18 +74,11 @@ def init_db():
 # Планировщик задач для ежедневной отправки меню
 scheduler = BackgroundScheduler()
 
-
 @app.on_event("startup")
 def startup_event():
   init_db()
-  scheduler.add_job(
-      daily_telegram_menu_job,
-      "cron",
-      hour=10,
-      minute=0,
-      id="daily_menu_job",
-      replace_existing=True,
-  )
+  # Автоматическая утренняя задача удалена.
+  # Теперь меню отправляется исключительно по нажатию кнопки в ERP.
   scheduler.start()
 
 
