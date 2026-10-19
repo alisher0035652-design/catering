@@ -414,6 +414,7 @@ def get_all_products_with_units() -> dict:
 
 
 # --- Генерация PDF по шаблону Menu shablon.xlsx ---
+# --- Генерация PDF по шаблону Menu shablon.xlsx с 3 штампами/подписями ---
 def generate_menu_pdf_for_point(
     report_date_str: str,
     region: str,
@@ -433,10 +434,10 @@ def generate_menu_pdf_for_point(
 
   ws = wb[sheet_name]
 
-  # Заполнение ячеек
-  ws["A1"] = report_date_str
-  ws["A4"] = children_count
-  ws["F1"] = point_name
+  # Заполнение ячеек согласно ТЗ
+  ws["A1"] = report_date_str  # Дата
+  ws["A4"] = children_count  # Кол-во детей
+  ws["F1"] = point_name  # Номер МТТ (например 1-МТТ)
 
   temp_excel_path = f"temp_{region}_{point_id}_{report_date_str}.xlsx"
   temp_pdf_path = f"temp_{region}_{point_id}_{report_date_str}.pdf"
@@ -445,7 +446,7 @@ def generate_menu_pdf_for_point(
   wb.save(temp_excel_path)
   wb.close()
 
-  # Конвертация в PDF
+  # Конвертация в PDF через LibreOffice
   subprocess.run(
       [
           "libreoffice",
@@ -459,12 +460,27 @@ def generate_menu_pdf_for_point(
       check=True,
   )
 
-  # Наложение печати и подписи
-  stamp_path = "stamp_sign.png"
-  if os.path.exists(stamp_path) and os.path.exists(temp_pdf_path):
+  # Наложение печатей и подписей (stamp_1, stamp_2, stamp_3)
+  stamp1_path = "stamp_1.png"  # Подпись технолога (внизу)
+  stamp2_path = "stamp_2.png"  # Печать MUXSIN-FAYZ (вверху поверх stamp_3)
+  stamp3_path = "stamp_3.png"  # Подпись Р. Ярманова (вверху)
+
+  if os.path.exists(temp_pdf_path):
     packet = io.BytesIO()
     can = canvas.Canvas(packet, pagesize=landscape(A4))
-    can.drawImage(stamp_path, 680, 480, width=130, height=85, mask="auto")
+
+    # 1. Подпись Р. Ярманова (stamp_3.png) - верхний правый угол
+    if os.path.exists(stamp3_path):
+      can.drawImage(stamp3_path, 690, 500, width=100, height=50, mask="auto")
+
+    # 2. Круглая печать (stamp_2.png) - накладывается поверх stamp_3 вверху
+    if os.path.exists(stamp2_path):
+      can.drawImage(stamp2_path, 660, 485, width=95, height=95, mask="auto")
+
+    # 3. Подпись технолога (stamp_1.png) - внизу у строки "Технолог"
+    if os.path.exists(stamp1_path):
+      can.drawImage(stamp1_path, 260, 50, width=100, height=45, mask="auto")
+
     can.save()
     packet.seek(0)
 
@@ -479,6 +495,7 @@ def generate_menu_pdf_for_point(
     with open(final_pdf_path, "wb") as f:
       output_pdf.write(f)
 
+    # Удаление временных файлов
     if os.path.exists(temp_excel_path):
       os.remove(temp_excel_path)
     if os.path.exists(temp_pdf_path):
@@ -487,9 +504,7 @@ def generate_menu_pdf_for_point(
     return final_pdf_path
   else:
     return temp_pdf_path
-
-
-def send_pdf_to_telegram(pdf_path: str, caption: str):
+    def send_pdf_to_telegram(pdf_path: str, caption: str):
   if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
     print("Не заданы TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID")
     return None
