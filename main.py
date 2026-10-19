@@ -413,10 +413,7 @@ def get_all_products_with_units() -> dict:
   return dict(sorted(products.items()))
 
 
-# --- Генерация PDF по шаблону Menu shablon.xlsx с 3 штампами/подписями ---
-# --- ИСПРАВЛЕННАЯ ФУНКЦИЯ ГЕНЕРАЦИИ PDF ---
-# --- ИСПРАВЛЕННАЯ ФУНКЦИЯ ГЕНЕРАЦИИ PDF ---
-# --- ТОЧНАЯ ГЕНЕРАЦИЯ PDF И РАССТАНОВКА ШТАМПОВ ЧЕРЕЗ REPORTLAB ---
+# --- ФУНКЦИЯ ГЕНЕРАЦИИ PDF (ТОЧНЫЙ ФОРМАТ КАК ПРИ СТАНДАРТНОЙ ПЕЧАТИ CTRL+P) ---
 def generate_menu_pdf_for_point(
     report_date_str: str,
     region: str,
@@ -449,16 +446,16 @@ def generate_menu_pdf_for_point(
 
   ws = wb[target_sheet_name]
 
-  # Заполняем текстовые данные
-  ws["A1"] = formatted_date  # Дата в формате ДД.ММ.ГГГГ
-  ws["A4"] = children_count  # Кол-во детей
-  ws["F1"] = point_name  # Номер МТТ
+  # Заполняем текстовые данные (Дата в А1, количество детей в А4, имя МТТ в F1)
+  ws["A1"] = formatted_date
+  ws["A4"] = children_count
+  ws["F1"] = point_name
 
-  # Принудительная подгонка под 1 страницу A4 Landscape
+  # Точная настройка параметров печати, как при Ctrl + P в Excel
   ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
   ws.page_setup.paperSize = ws.PAPERSIZE_A4
   ws.page_setup.fitToWidth = 1
-  ws.page_setup.fitToHeight = 1
+  ws.page_setup.fitToHeight = 0  # Автоматическая высота под количество строк листа
   ws.sheet_properties.pageSetUpPr.fitToPage = True
 
   temp_excel_path = f"temp_{region}_{point_id}_{report_date_str}.xlsx"
@@ -526,6 +523,8 @@ def generate_menu_pdf_for_point(
     return final_pdf_path
   else:
     return temp_pdf_path
+
+
 def send_pdf_to_telegram(pdf_path: str, caption: str):
   target_chat_id = TELEGRAM_ADMIN_CHAT_ID or TELEGRAM_CHAT_ID
 
@@ -590,7 +589,7 @@ async def process_and_send_menu_in_background(
       if pdf_file and os.path.exists(pdf_file):
         os.remove(pdf_file)
 
-      # 4. Пауза 2 секунды, чтобы бесплатный сервер Render успевал освобождать CPU/RAM
+      # 4. Пауза 2 секунды для сервера Render
       await asyncio.sleep(2)
 
     except Exception as e:
