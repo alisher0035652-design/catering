@@ -3,15 +3,25 @@ import io
 import json
 import os
 import re
+import subprocess
+from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
+import openpyxl
 import pandas as pd
 import psycopg2
 import psycopg2.extras
+from PyPDF2 import PdfReader, PdfWriter
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.pdfgen import canvas
+import requests
 
 app = FastAPI(title="Catering Management API", version="1.0.0")
 
 _MENU_CACHE = {}
+
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 
 def get_db_connection():
@@ -34,14 +44,12 @@ def get_db_connection():
 def init_db():
   conn = get_db_connection()
   cursor = conn.cursor()
-  # Таблица для календаря (настройки дней)
   cursor.execute("""
         CREATE TABLE IF NOT EXISTS app_settings (
             date_str VARCHAR(20) PRIMARY KEY,
             data JSONB
         );
     """)
-  # Таблица для актов инвентаризации склада
   cursor.execute("""
         CREATE TABLE IF NOT EXISTS stock_acts (
             date_str VARCHAR(20),
@@ -50,7 +58,6 @@ def init_db():
             PRIMARY KEY (date_str, region)
         );
     """)
-  # Таблица для фактического присутствия детей
   cursor.execute("""
         CREATE TABLE IF NOT EXISTS fact_children (
             date_str VARCHAR(20),
@@ -64,12 +71,29 @@ def init_db():
   conn.close()
 
 
+# Планировщик задач для ежедневной отправки меню
+scheduler = BackgroundScheduler()
+
+
 @app.on_event("startup")
 def startup_event():
   init_db()
+  scheduler.add_job(
+      daily_telegram_menu_job,
+      "cron",
+      hour=10,
+      minute=0,
+      id="daily_menu_job",
+      replace_existing=True,
+  )
+  scheduler.start()
 
 
-# --- Функции работы с БД для Настроек Календаря ---
+@app.on_event("shutdown")
+def shutdown_event():
+  scheduler.shutdown()
+
+
 def load_manual_settings() -> dict:
   try:
     conn = get_db_connection()
@@ -81,7 +105,9 @@ def load_manual_settings() -> dict:
     cursor.close()
     conn.close()
     if row:
-      return row["data"] if isinstance(row["data"], dict) else json.loads(row["data"])
+      return (
+          row["data"] if isinstance(row["data"], dict) else json.loads(row["data"])
+      )
   except Exception as e:
     print(f"Ошибка загрузки календаря из БД: {e}")
   return {"days": {}}
@@ -106,7 +132,6 @@ def save_manual_settings(settings: dict):
     print(f"Ошибка сохранения календаря в БД: {e}")
 
 
-# --- Функции работы с БД для Инвентаризации ---
 def load_stock_settings() -> dict:
   stock_map = {}
   try:
@@ -162,7 +187,6 @@ def delete_stock_settings_for_date(date_str: str, region: str):
     print(f"Ошибка удаления инвентаризации из БД: {e}")
 
 
-# --- Функции работы с БД для Факта Детей ---
 def load_fact_children_settings() -> dict:
   fact_map = {}
   try:
@@ -396,6 +420,138 @@ def get_all_products_with_units() -> dict:
   return dict(sorted(products.items()))
 
 
+# --- Генерация PDF по шаблону Menu shablon.xlsx ---
+def generate_menu_pdf_for_point(
+    report_date_str: str,
+    region: str,
+    point_id: int,
+    point_name: str,
+    children_count: int,
+    menu_num: int,
+) -> str:
+  template_path = "Menu shablon.xlsx"
+  if not os.path.exists(template_path):
+    raise FileNotFoundError("Шаблон Menu shablon.xlsx не найден")
+
+  wb = openpyxl.load_workbook(template_path)
+  sheet_name = str(menu_num)
+  if sheet_name not in wb.sheetnames:
+    raise ValueError(f"Лист меню {sheet_name} не найден в шаблоне")
+
+  ws = wb[sheet_name]
+
+  # Заполнение ячеек
+  ws["A1"] = report_date_str
+  ws["A4"] = children_count
+  ws["F1"] = point_name
+
+  temp_excel_path = f"temp_{region}_{point_id}_{report_date_str}.xlsx"
+  temp_pdf_path = f"temp_{region}_{point_id}_{report_date_str}.pdf"
+  final_pdf_path = f"Menu_{point_name}_{report_date_str}.pdf"
+
+  wb.save(temp_excel_path)
+  wb.close()
+
+  # Конвертация в PDF
+  subprocess.run(
+      [
+          "libreoffice",
+          "--headless",
+          "--convert-to",
+          "pdf",
+          temp_excel_path,
+          "--outdir",
+          ".",
+      ],
+      check=True,
+  )
+
+  # Наложение печати и подписи
+  stamp_path = "stamp_sign.png"
+  if os.path.exists(stamp_path) and os.path.exists(temp_pdf_path):
+    packet = io.BytesIO()
+    can = canvas.Canvas(packet, pagesize=landscape(A4))
+    can.drawImage(stamp_path, 680, 480, width=130, height=85, mask="auto")
+    can.save()
+    packet.seek(0)
+
+    stamp_pdf = PdfReader(packet)
+    original_pdf = PdfReader(temp_pdf_path)
+    output_pdf = PdfWriter()
+
+    for page in original_pdf.pages:
+      page.merge_page(stamp_pdf.pages[0])
+      output_pdf.add_page(page)
+
+    with open(final_pdf_path, "wb") as f:
+      output_pdf.write(f)
+
+    if os.path.exists(temp_excel_path):
+      os.remove(temp_excel_path)
+    if os.path.exists(temp_pdf_path):
+      os.remove(temp_pdf_path)
+
+    return final_pdf_path
+  else:
+    return temp_pdf_path
+
+
+def send_pdf_to_telegram(pdf_path: str, caption: str):
+  if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    print("Не заданы TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID")
+    return None
+
+  url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+  with open(pdf_path, "rb") as f:
+    files = {"document": f}
+    data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption}
+    response = requests.post(url, data=data, files=files)
+  return response.json()
+
+
+def daily_telegram_menu_job():
+  today_str = date.today().isoformat()
+  regions = ["Город", "Район"]
+
+  for region in regions:
+    fact_storage = load_fact_children_settings()
+    saved_fact = fact_storage.get(today_str, {}).get(region, {})
+
+    if not saved_fact:
+      print(f"Нет проводки факта за {today_str} ({region}). Пропуск отправки.")
+      continue
+
+    menu_num = get_menu_number_for_date_custom(date.today())
+    if not menu_num:
+      print(f"Сегодня {today_str} выходной день. Отправка отменена.")
+      continue
+
+    points_dict = load_points_from_excel(region)
+    for pid, pinfo in points_dict.items():
+      child_cnt = saved_fact.get(str(pid), saved_fact.get(pid))
+      if child_cnt is None:
+        continue
+
+      p_name = pinfo["name"]
+      pdf_file = generate_menu_pdf_for_point(
+          report_date_str=today_str,
+          region=region,
+          point_id=pid,
+          point_name=p_name,
+          children_count=int(child_cnt),
+          menu_num=menu_num,
+      )
+
+      caption = (
+          f"📋 Официальное меню № {menu_num} для {p_name} ({region})\n📅 Дата:"
+          f" {today_str}\n👶 Детей: {child_cnt}"
+      )
+      send_pdf_to_telegram(pdf_file, caption)
+
+      if os.path.exists(pdf_file):
+        os.remove(pdf_file)
+
+
 @app.get("/", response_class=HTMLResponse)
 def get_dashboard():
   html_content = """
@@ -469,9 +625,10 @@ def get_dashboard():
                             <label class="text-xs font-medium text-gray-600 block">Дата отчета:</label>
                             <input type="date" id="factDate" onchange="loadFactData()" class="border border-gray-300 rounded-md px-3 py-2 text-sm">
                         </div>
-                        <div class="self-end flex gap-2">
+                        <div class="self-end flex flex-wrap gap-2">
                             <button onclick="saveFactChildren()" class="bg-green-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-green-700 transition">💾 Сохранить факт</button>
                             <button onclick="downloadFactExcel()" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 transition">📥 Скачать в Excel</button>
+                            <button onclick="sendMenuTelegramManual()" class="bg-indigo-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-indigo-700 transition">📤 Отправить меню в Telegram</button>
                         </div>
                     </div>
                 </header>
@@ -845,6 +1002,20 @@ def get_dashboard():
                     loadFactData();
                 } else {
                     alert('Ошибка при удалении.');
+                }
+            }
+
+            async function sendMenuTelegramManual() {
+                const dateVal = document.getElementById('factDate').value;
+                const region = document.getElementById('factRegionSelect').value;
+                if(!confirm(`Сформировать и отправить официальное меню с печатью за ${dateVal} (${region}) в Telegram?`)) return;
+
+                const res = await fetch(`/api/menu/generate-and-send?report_date=${dateVal}&region=${region}`, { method: 'POST' });
+                const data = await res.json();
+                if(res.ok) {
+                    alert('Меню успешно отправлено в Telegram группу!');
+                } else {
+                    alert('Ошибка: ' + (data.detail || 'Не удалось отправить'));
                 }
             }
 
@@ -1387,6 +1558,62 @@ def export_fact_excel(report_date: str, region: str = "Город"):
           )
       },
   )
+
+
+@app.post("/api/menu/generate-and-send")
+def generate_and_send_menu_api(report_date: str, region: str = "Город"):
+  try:
+    parsed_date = date.fromisoformat(report_date)
+  except Exception:
+    raise HTTPException(status_code=400, detail="Неверная дата")
+
+  fact_storage = load_fact_children_settings()
+  saved_fact = fact_storage.get(report_date, {}).get(region, {})
+
+  if not saved_fact:
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Нет сохраненной проводки факта за {report_date} ({region})."
+            " Отправка PDF невозможна."
+        ),
+    )
+
+  menu_num = get_menu_number_for_date_custom(parsed_date)
+  if not menu_num:
+    raise HTTPException(
+        status_code=400, detail="На указанную дату по календарю выходной день."
+    )
+
+  points_dict = load_points_from_excel(region)
+  sent_files = []
+
+  for pid, pinfo in points_dict.items():
+    child_cnt = saved_fact.get(str(pid), saved_fact.get(pid))
+    if child_cnt is None:
+      continue
+
+    p_name = pinfo["name"]
+    pdf_file = generate_menu_pdf_for_point(
+        report_date_str=report_date,
+        region=region,
+        point_id=pid,
+        point_name=p_name,
+        children_count=int(child_cnt),
+        menu_num=menu_num,
+    )
+
+    caption = (
+        f"📋 Официальное меню № {menu_num} для {p_name} ({region})\n📅 Дата:"
+        f" {report_date}\n👶 Детей: {child_cnt}"
+    )
+    res = send_pdf_to_telegram(pdf_file, caption)
+    sent_files.append({"point": p_name, "telegram_status": res})
+
+    if os.path.exists(pdf_file):
+      os.remove(pdf_file)
+
+  return {"status": "success", "sent_reports": sent_files}
 
 
 @app.get("/api/stock/matrix/{region}")
