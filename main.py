@@ -21,8 +21,7 @@ app = FastAPI(title="Catering Management API", version="1.0.0")
 _MENU_CACHE = {}
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-
+TELEGRAM_ADMIN_CHAT_ID = os.environ.get("TELEGRAM_ADMIN_CHAT_ID", "")  
 
 def get_db_connection():
   database_url = os.environ.get("DATABASE_URL")
@@ -505,17 +504,19 @@ def generate_menu_pdf_for_point(
   else:
     return temp_pdf_path
 def send_pdf_to_telegram(pdf_path: str, caption: str):
-  if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-    print("Не заданы TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID")
+  # Используем личный ID (или TELEGRAM_CHAT_ID, если там прописан ваш личный ID)
+  target_chat_id = TELEGRAM_ADMIN_CHAT_ID or TELEGRAM_CHAT_ID
+
+  if not TELEGRAM_BOT_TOKEN or not target_chat_id:
+    print("Не заданы TELEGRAM_BOT_TOKEN или TELEGRAM_ADMIN_CHAT_ID")
     return None
 
   url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
   with open(pdf_path, "rb") as f:
     files = {"document": f}
-    data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption}
+    data = {"chat_id": target_chat_id, "caption": caption}
     response = requests.post(url, data=data, files=files)
   return response.json()
-
 
 def daily_telegram_menu_job():
   today_str = date.today().isoformat()
