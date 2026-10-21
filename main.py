@@ -13,9 +13,6 @@ import openpyxl
 import pandas as pd
 import psycopg2
 import psycopg2.extras
-from PyPDF2 import PdfReader, PdfWriter
-from reportlab.lib.pagesizes import A4, landscape
-from reportlab.pdfgen import canvas
 import requests
 
 app = FastAPI(title="Catering Management API", version="1.0.0")
@@ -73,7 +70,6 @@ def init_db():
   conn.close()
 
 
-# Планировщик задач для ежедневной отправки меню
 scheduler = BackgroundScheduler()
 
 @app.on_event("startup")
@@ -413,8 +409,6 @@ def get_all_products_with_units() -> dict:
   return dict(sorted(products.items()))
 
 
-# --- ФУНКЦИЯ ГЕНЕРАЦИИ PDF (ТОЧНЫЙ ФОРМАТ КАК ПРИ СТАНДАРТНОЙ ПЕЧАТИ CTRL+P) ---
-# --- ФИНАЛЬНАЯ ФУНКЦИЯ ГЕНЕРАЦИИ PDF ЧЕРЕЗ ШАБЛОН С ГОТОВЫМИ ПЕЧАТЯМИ ---
 def generate_menu_pdf_for_point(
     report_date_str: str,
     region: str,
@@ -427,7 +421,6 @@ def generate_menu_pdf_for_point(
   if not os.path.exists(template_path):
     raise FileNotFoundError("Шаблон Menu shablon.xlsx не найден")
 
-  # Формат даты ДД.ММ.ГГГГ (например, 19.10.2026)
   try:
     d_obj = date.fromisoformat(report_date_str)
     formatted_date = d_obj.strftime("%d.%m.%Y")
@@ -440,19 +433,16 @@ def generate_menu_pdf_for_point(
   if target_sheet_name not in wb.sheetnames:
     raise ValueError(f"Лист меню {target_sheet_name} не найден в шаблоне")
 
-  # Удаляем все лишние листы, оставляем только нужный день меню по календарю
   for sheetname in wb.sheetnames:
     if sheetname != target_sheet_name:
       del wb[sheetname]
 
   ws = wb[target_sheet_name]
 
-  # Заполняем ключевые ячейки (формулы внизу посчитают всё сами по A4)
-  ws["A1"] = formatted_date  # Дата в формате ДД.ММ.ГГГГ
-  ws["A4"] = children_count  # Количество детей (запускает расчет формул)
-  ws["F1"] = point_name  # Название / номер МТТ
+  ws["A1"] = formatted_date
+  ws["A4"] = children_count
+  ws["F1"] = point_name
 
-  # Настройки печати (как при Ctrl + P в Excel: вписать в 1 страницу)
   ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
   ws.page_setup.paperSize = ws.PAPERSIZE_A4
   ws.page_setup.fitToWidth = 1
@@ -465,7 +455,6 @@ def generate_menu_pdf_for_point(
   wb.save(temp_excel_path)
   wb.close()
 
-  # Конвертация в PDF через LibreOffice (печати и формулы уже внутри файла)
   subprocess.run(
       [
           "libreoffice",
@@ -486,7 +475,6 @@ def generate_menu_pdf_for_point(
       os.remove(final_pdf_path)
     os.rename(generated_pdf, final_pdf_path)
 
-    # Удаляем временный файл Excel
     if os.path.exists(temp_excel_path):
       os.remove(temp_excel_path)
 
@@ -519,7 +507,6 @@ def send_pdf_to_telegram(pdf_path: str, caption: str):
     return None
 
 
-# --- Асинхронная фоновая задача для генерации и отправки по очереди ---
 async def process_and_send_menu_in_background(
     report_date: str, region: str, saved_fact: dict, menu_num: int
 ):
@@ -537,7 +524,6 @@ async def process_and_send_menu_in_background(
     p_name = pinfo["name"]
 
     try:
-      # 1. Генерируем PDF с печатями
       pdf_file = generate_menu_pdf_for_point(
           report_date_str=report_date,
           region=region,
@@ -547,18 +533,15 @@ async def process_and_send_menu_in_background(
           menu_num=menu_num,
       )
 
-      # 2. Отправляем в Telegram
       caption = (
           f"📋 Официальное меню № {menu_num} для {p_name} ({region})\n📅 Дата:"
           f" {report_date}\n👶 Детей: {child_cnt}"
       )
       send_pdf_to_telegram(pdf_file, caption)
 
-      # 3. Удаляем временный файл
       if pdf_file and os.path.exists(pdf_file):
         os.remove(pdf_file)
 
-      # 4. Пауза 2 секунды для сервера Render
       await asyncio.sleep(2)
 
     except Exception as e:
@@ -647,6 +630,19 @@ def get_dashboard():
                         </div>
                     </div>
                 </header>
+
+                <!-- Блок скачивания детей по МТТ (Дни по колонке A, МТТ по строке 1) -->
+                <div class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center border-l-4 border-purple-500">
+                    <div>
+                        <h3 class="font-bold text-gray-800 text-md">📊 Скачать посещаемость детей (Дни по вертикали, МТТ в шапке)</h3>
+                        <p class="text-xs text-gray-500 mt-0.5">Выберите месяц для формирования сводной таблицы посещаемости</p>
+                    </div>
+                    <div class="mt-3 md:mt-0 flex items-center gap-3">
+                        <input type="month" id="childrenMonthPicker" class="border border-gray-300 rounded-md px-3 py-2 text-sm">
+                        <button onclick="downloadChildrenMatrixExcel()" class="bg-purple-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-purple-700 transition">📥 Скачать детей (МТТ)</button>
+                    </div>
+                </div>
+
                 <div id="factContainer" class="space-y-6">
                     <p class="p-8 text-center text-gray-400 bg-white shadow rounded-lg">Загрузка данных...</p>
                 </div>
@@ -779,9 +775,15 @@ def get_dashboard():
             document.getElementById('stockDate').valueAsDate = new Date();
             document.getElementById('factDate').valueAsDate = new Date();
             document.getElementById('balanceDate').valueAsDate = new Date();
+            
+            // Устанавливаем текущий месяц в пикер
+            const now = new Date();
+            const yearStr = now.getFullYear();
+            const monthStr = String(now.getMonth() + 1).padStart(2, '0');
+            document.getElementById('childrenMonthPicker').value = `${yearStr}-${monthStr}`;
 
-            let viewYear = new Date().getFullYear();
-            let viewMonth = new Date().getMonth();
+            let viewYear = now.getFullYear();
+            let viewMonth = now.getMonth();
             let selectedDateStr = '';
 
             function switchTab(tab) {
@@ -1032,6 +1034,16 @@ def get_dashboard():
                 } else {
                     alert('Ошибка: ' + (data.detail || 'Не удалось запустить отправку'));
                 }
+            }
+
+            function downloadChildrenMatrixExcel() {
+                const monthVal = document.getElementById('childrenMonthPicker').value;
+                const region = document.getElementById('factRegionSelect').value;
+                if (!monthVal) {
+                    alert('Пожалуйста, выберите месяц');
+                    return;
+                }
+                window.location.href = `/api/fact/export/children-matrix?month=${monthVal}&region=${region}`;
             }
 
             async function loadBalanceData() {
@@ -1575,7 +1587,62 @@ def export_fact_excel(report_date: str, region: str = "Город"):
   )
 
 
-# --- Эндпоинт ручного запуска отправки через фоновую задачу ---
+# --- ЭНДПОИНТ СКАЧИВАНИЯ ПОСЕЩАЕМОСТИ ДЕТЕЙ В РАЗРЕЗЕ МТТ (Дни по колонке A, МТТ в строке 1) ---
+@app.get("/api/fact/export/children-matrix")
+def export_children_matrix_excel(month: str, region: str = "Город"):
+  # month формат: "YYYY-MM" (например, "2026-10")
+  try:
+    parts = month.split("-")
+    year = int(parts[0])
+    m = int(parts[1])
+  except Exception:
+    raise HTTPException(status_code=400, detail="Неверный формат месяца. Используйте YYYY-MM")
+
+  start_date = date(year, m, 1)
+  if m == 12:
+    end_date = date(year + 1, 1, 1) - timedelta(days=1)
+  else:
+    end_date = date(year, m + 1, 1) - timedelta(days=1)
+
+  points_dict = load_points_from_excel(region)
+  fact_storage = load_fact_children_settings()
+
+  rows_data = []
+  current = start_date
+  while current <= end_date:
+    d_str = current.isoformat()
+    saved_day_fact = fact_storage.get(d_str, {}).get(region, {})
+
+    row = {"Дата": d_str}
+    for pid, pinfo in points_dict.items():
+      p_name = pinfo["name"]
+      # Если факт сохранен — берем сохраненное значение, иначе дефолтное по плану
+      val = saved_day_fact.get(str(pid))
+      if val is None:
+        val = saved_day_fact.get(pid, pinfo["children_count"])
+      row[p_name] = int(val)
+
+    rows_data.append(row)
+    current += timedelta(days=1)
+
+  df = pd.DataFrame(rows_data)
+  if df.empty:
+    df = pd.DataFrame(columns=["Дата"])
+
+  output = io.BytesIO()
+  with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    df.to_excel(writer, index=False, sheet_name=f"Дети_{region}_{month}")
+  output.seek(0)
+
+  return StreamingResponse(
+      output,
+      media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      headers={
+          "Content-Disposition": f"attachment; filename=Children_Attendance_{region}_{month}.xlsx"
+      },
+  )
+
+
 @app.post("/api/menu/generate-and-send")
 def generate_and_send_menu_api(
     report_date: str, background_tasks: BackgroundTasks, region: str = "Город"
@@ -1603,7 +1670,6 @@ def generate_and_send_menu_api(
         status_code=400, detail="На указанную дату по календарю выходной день."
     )
 
-  # Запуск в фоновом режиме, чтобы UI не зависал
   background_tasks.add_task(
       process_and_send_menu_in_background,
       report_date=report_date,
