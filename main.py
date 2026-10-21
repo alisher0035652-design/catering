@@ -1348,14 +1348,16 @@ def get_fact_report(report_date: str, region: str = "Город"):
   for pid, pinfo in points_dict.items():
     child_cnt = saved_fact_children.get(str(pid))
     if child_cnt is None:
-      child_cnt = saved_fact_children.get(pid, 0)  # <-- ТЕПЕРЬ ПО УМОЛЧАНИЮ 0
+      # По умолчанию ставим 0, если факт еще не был сохранен
+      child_cnt = saved_fact_children.get(pid, 0)
     else:
       child_cnt = int(child_cnt)
 
-  points_list.append({
+    points_list.append({
         "id": pid,
         "name": pinfo["name"],
         "default_children": child_cnt,
+        "plan_children": pinfo["children_count"],
     })
 
   menu_num = get_menu_number_for_date_custom(parsed_date)
@@ -1390,7 +1392,6 @@ def get_fact_report(report_date: str, region: str = "Город"):
       "fact_children": saved_fact_children,
       "fact_consumption": fact_consumption,
   }
-
 
 @app.get("/api/fact/saved-days")
 def get_saved_days_list(region: str = "Город"):
