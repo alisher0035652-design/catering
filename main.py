@@ -448,7 +448,7 @@ def generate_menu_pdf_for_point(
   ws["A4"] = children_count
   ws["F1"] = point_name
 
-  # --- НАСТРОЙКА ОТСТУПОВ И ПЕЧАТИ ---
+  # --- НАСТРОЙКА ЦЕНТРИРОВАНИЯ И ОТСТУПОВ ---
   ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
   ws.page_setup.paperSize = ws.PAPERSIZE_A4
 
@@ -457,12 +457,16 @@ def generate_menu_pdf_for_point(
   ws.page_setup.fitToHeight = 1
   ws.sheet_properties.pageSetUpPr.fitToPage = True
 
-  # Настройка полей (в дюймах: 1 дюйм ≈ 2.54 см)
-  ws.page_margins.left = 0.6  # Больше слева (около 2 см), чтобы не срезало край
-  ws.page_margins.right = 0.5  # Меньше справа (~0.7 см)
-  ws.page_margins.top = 0.2  # Меньше сверху (~0.5 см)
-  ws.page_margins.bottom = 0.2  # Меньше снизу (~0.5 см)
-  ws.page_margins.header = 0.0  # Убираем колонтитулы для экономии места
+  # Центрирование по горизонтали и вертикали
+  ws.page_setup.horizontalCentered = True
+  ws.page_setup.verticalCentered = True
+
+  # Поля страницы
+  ws.page_margins.left = 0.4
+  ws.page_margins.right = 0.4
+  ws.page_margins.top = 0.3
+  ws.page_margins.bottom = 0.3
+  ws.page_margins.header = 0.0
   ws.page_margins.footer = 0.0
 
   temp_excel_path = f"temp_{region}_{point_id}_{report_date_str}.xlsx"
