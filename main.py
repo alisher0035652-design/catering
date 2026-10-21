@@ -1344,11 +1344,11 @@ def get_fact_report(report_date: str, region: str = "Город"):
   fact_storage = load_fact_children_settings()
   saved_fact_children = fact_storage.get(report_date, {}).get(region, {})
 
-  points_list = []
+ points_list = []
   for pid, pinfo in points_dict.items():
     child_cnt = saved_fact_children.get(str(pid))
     if child_cnt is None:
-      child_cnt = saved_fact_children.get(pid, pinfo["children_count"])
+      child_cnt = saved_fact_children.get(pid, 0)  # <-- ТЕПЕРЬ ПО УМОЛЧАНИЮ 0
     else:
       child_cnt = int(child_cnt)
 
