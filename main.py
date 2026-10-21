@@ -1692,6 +1692,9 @@ def export_children_matrix_excel(month: str, region: str = "Город"):
       df.to_excel(writer, index=False, sheet_name=f"Дети_{region}_{month}")
     output.seek(0)
 
+    # Безопасное имя файла на английском, чтобы избежать ошибок кодировки HTTP-заголовков
+    region_safe = "Gorod" if region == "Город" else "Rayon"
+
     return StreamingResponse(
         output,
         media_type=(
@@ -1699,7 +1702,7 @@ def export_children_matrix_excel(month: str, region: str = "Город"):
         ),
         headers={
             "Content-Disposition": (
-                f"attachment; filename=Children_Attendance_{region}_{month}.xlsx"
+                f"attachment; filename=Children_Attendance_{region_safe}_{month}.xlsx"
             )
         },
     )
@@ -1708,7 +1711,6 @@ def export_children_matrix_excel(month: str, region: str = "Город"):
     raise HTTPException(
         status_code=500, detail=f"Ошибка генерации файла: {str(e)}"
     )
-
 
 @app.post("/api/menu/generate-and-send")
 def generate_and_send_menu_api(
