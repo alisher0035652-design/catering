@@ -13,6 +13,9 @@ import openpyxl
 import pandas as pd
 import psycopg2
 import psycopg2.extras
+from PyPDF2 import PdfReader, PdfWriter
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.pdfgen import canvas
 import requests
 
 app = FastAPI(title="Catering Management API", version="1.0.0")
@@ -70,6 +73,7 @@ def init_db():
   conn.close()
 
 
+# Планировщик задач для ежедневной отправки меню
 scheduler = BackgroundScheduler()
 
 @app.on_event("startup")
@@ -625,13 +629,14 @@ def get_dashboard():
                         </div>
                         <div class="self-end flex flex-wrap gap-2">
                             <button onclick="saveFactChildren()" class="bg-green-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-green-700 transition">💾 Сохранить факт</button>
-                            <button onclick="downloadFactExcel()" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 transition">📥 Скачать в Excel</button>
+                            <button onclick="downloadFactExcel()" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 transition">📥 Скачать факт (День)</button>
+                            <button onclick="downloadFactAllRegionsExcel()" class="bg-emerald-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-emerald-700 transition">📥 Скачать факт (Город + Район)</button>
                             <button onclick="sendMenuTelegramManual()" class="bg-indigo-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-indigo-700 transition">📤 Отправить меню в Telegram</button>
                         </div>
                     </div>
                 </header>
 
-                <!-- Блок скачивания детей по МТТ (Дни по колонке A, МТТ по строке 1) -->
+                <!-- Блок скачивания посещаемости детей по МТТ (Дни по колонке A, МТТ в шапке) -->
                 <div class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center border-l-4 border-purple-500">
                     <div>
                         <h3 class="font-bold text-gray-800 text-md">📊 Скачать посещаемость детей (Дни по вертикали, МТТ в шапке)</h3>
@@ -776,7 +781,6 @@ def get_dashboard():
             document.getElementById('factDate').valueAsDate = new Date();
             document.getElementById('balanceDate').valueAsDate = new Date();
             
-            // Устанавливаем текущий месяц в пикер
             const now = new Date();
             const yearStr = now.getFullYear();
             const monthStr = String(now.getMonth() + 1).padStart(2, '0');
@@ -1036,6 +1040,17 @@ def get_dashboard():
                 }
             }
 
+            function downloadFactExcel() {
+                const dateVal = document.getElementById('factDate').value;
+                const region = document.getElementById('factRegionSelect').value;
+                window.location.href = `/api/fact/export/excel?report_date=${dateVal}&region=${region}`;
+            }
+
+            function downloadFactAllRegionsExcel() {
+                const dateVal = document.getElementById('factDate').value;
+                window.location.href = `/api/fact/export/all-regions-excel?report_date=${dateVal}`;
+            }
+
             function downloadChildrenMatrixExcel() {
                 const monthVal = document.getElementById('childrenMonthPicker').value;
                 const region = document.getElementById('factRegionSelect').value;
@@ -1120,12 +1135,6 @@ def get_dashboard():
                     alert('Фактическое присутствие детей успешно сохранено!');
                     loadFactData();
                 } else alert('Ошибка сохранения.');
-            }
-
-            function downloadFactExcel() {
-                const dateVal = document.getElementById('factDate').value;
-                const region = document.getElementById('factRegionSelect').value;
-                window.location.href = `/api/fact/export/excel?report_date=${dateVal}&region=${region}`;
             }
 
             async function loadStockMatrix() {
@@ -1587,16 +1596,59 @@ def export_fact_excel(report_date: str, region: str = "Город"):
   )
 
 
-# --- ЭНДПОИНТ СКАЧИВАНИЯ ПОСЕЩАЕМОСТИ ДЕТЕЙ В РАЗРЕЗЕ МТТ (Дни по колонке A, МТТ в строке 1) ---
+@app.get("/api/fact/export/all-regions-excel")
+def export_fact_all_regions_excel(report_date: str):
+  try:
+    parsed_date = date.fromisoformat(report_date)
+  except Exception:
+    raise HTTPException(status_code=400, detail="Неверный формат даты")
+
+  output = io.BytesIO()
+  with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    for region in ["Город", "Район"]:
+      report_data = get_fact_report(report_date, region)
+      points_dict = load_points_from_excel(region)
+
+      rows_data = []
+      fact_cons = report_data.get("fact_consumption", {})
+      for prod_name, pdata in fact_cons.items():
+        row = {"Продукт": prod_name, "Ед. изм.": pdata["unit"]}
+        for pid, pinfo in points_dict.items():
+          row[pinfo["name"]] = pdata["points_qty"].get(pid, 0.0)
+        row["ИТОГО ФАКТ"] = pdata["total_fact"]
+        rows_data.append(row)
+
+      df = pd.DataFrame(rows_data)
+      if df.empty:
+        df = pd.DataFrame(columns=["Продукт", "Ед. изм.", "ИТОГО ФАКТ"])
+
+      df.to_excel(writer, index=False, sheet_name=region)
+
+  output.seek(0)
+  return StreamingResponse(
+      output,
+      media_type=(
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      ),
+      headers={
+          "Content-Disposition": (
+              f"attachment; filename=Fact_Consumption_All_Regions_{report_date}.xlsx"
+          )
+      },
+  )
+
+
 @app.get("/api/fact/export/children-matrix")
 def export_children_matrix_excel(month: str, region: str = "Город"):
-  # month формат: "YYYY-MM" (например, "2026-10")
   try:
     parts = month.split("-")
     year = int(parts[0])
     m = int(parts[1])
   except Exception:
-    raise HTTPException(status_code=400, detail="Неверный формат месяца. Используйте YYYY-MM")
+    raise HTTPException(
+        status_code=400,
+        detail="Неверный формат месяца. Используйте YYYY-MM",
+    )
 
   start_date = date(year, m, 1)
   if m == 12:
@@ -1604,43 +1656,58 @@ def export_children_matrix_excel(month: str, region: str = "Город"):
   else:
     end_date = date(year, m + 1, 1) - timedelta(days=1)
 
-  points_dict = load_points_from_excel(region)
-  fact_storage = load_fact_children_settings()
+  try:
+    points_dict = load_points_from_excel(region)
+    fact_storage = load_fact_children_settings()
 
-  rows_data = []
-  current = start_date
-  while current <= end_date:
-    d_str = current.isoformat()
-    saved_day_fact = fact_storage.get(d_str, {}).get(region, {})
+    rows_data = []
+    current = start_date
+    while current <= end_date:
+      d_str = current.isoformat()
+      saved_day_fact = fact_storage.get(d_str, {}).get(region, {})
 
-    row = {"Дата": d_str}
-    for pid, pinfo in points_dict.items():
-      p_name = pinfo["name"]
-      # Если факт сохранен — берем сохраненное значение, иначе дефолтное по плану
-      val = saved_day_fact.get(str(pid))
-      if val is None:
-        val = saved_day_fact.get(pid, pinfo["children_count"])
-      row[p_name] = int(val)
+      row = {"Дата": d_str}
+      for pid, pinfo in points_dict.items():
+        p_name = pinfo["name"]
+        val = saved_day_fact.get(str(pid))
+        if val is None:
+          val = saved_day_fact.get(pid, pinfo["children_count"])
 
-    rows_data.append(row)
-    current += timedelta(days=1)
+        try:
+          num_val = int(float(val)) if val != "" and val is not None else int(pinfo["children_count"])
+        except Exception:
+          num_val = 0
 
-  df = pd.DataFrame(rows_data)
-  if df.empty:
-    df = pd.DataFrame(columns=["Дата"])
+        row[p_name] = num_val
 
-  output = io.BytesIO()
-  with pd.ExcelWriter(output, engine="openpyxl") as writer:
-    df.to_excel(writer, index=False, sheet_name=f"Дети_{region}_{month}")
-  output.seek(0)
+      rows_data.append(row)
+      current += timedelta(days=1)
 
-  return StreamingResponse(
-      output,
-      media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      headers={
-          "Content-Disposition": f"attachment; filename=Children_Attendance_{region}_{month}.xlsx"
-      },
-  )
+    df = pd.DataFrame(rows_data)
+    if df.empty:
+      df = pd.DataFrame(columns=["Дата"])
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+      df.to_excel(writer, index=False, sheet_name=f"Дети_{region}_{month}")
+    output.seek(0)
+
+    return StreamingResponse(
+        output,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=Children_Attendance_{region}_{month}.xlsx"
+            )
+        },
+    )
+  except Exception as e:
+    print(f"❌ Ошибка в export_children_matrix_excel: {e}")
+    raise HTTPException(
+        status_code=500, detail=f"Ошибка генерации файла: {str(e)}"
+    )
 
 
 @app.post("/api/menu/generate-and-send")
