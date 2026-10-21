@@ -443,15 +443,27 @@ def generate_menu_pdf_for_point(
 
   ws = wb[target_sheet_name]
 
+  # Заполнение данных
   ws["A1"] = formatted_date
   ws["A4"] = children_count
   ws["F1"] = point_name
 
+  # --- НАСТРОЙКА ОТСТУПОВ И ПЕЧАТИ ---
   ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
   ws.page_setup.paperSize = ws.PAPERSIZE_A4
+
+  # Вписываем в 1 страницу по ширине и высоте
   ws.page_setup.fitToWidth = 1
   ws.page_setup.fitToHeight = 1
   ws.sheet_properties.pageSetUpPr.fitToPage = True
+
+  # Настройка полей (в дюймах: 1 дюйм ≈ 2.54 см)
+  ws.page_margins.left = 0.6  # Больше слева (около 2 см), чтобы не срезало край
+  ws.page_margins.right = 0.5  # Меньше справа (~0.7 см)
+  ws.page_margins.top = 0.2  # Меньше сверху (~0.5 см)
+  ws.page_margins.bottom = 0.2  # Меньше снизу (~0.5 см)
+  ws.page_margins.header = 0.0  # Убираем колонтитулы для экономии места
+  ws.page_margins.footer = 0.0
 
   temp_excel_path = f"temp_{region}_{point_id}_{report_date_str}.xlsx"
   final_pdf_path = f"Menu_{point_name}_{report_date_str}.pdf"
@@ -459,6 +471,7 @@ def generate_menu_pdf_for_point(
   wb.save(temp_excel_path)
   wb.close()
 
+  # Конвертация в PDF через LibreOffice
   subprocess.run(
       [
           "libreoffice",
