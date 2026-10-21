@@ -464,7 +464,7 @@ def generate_menu_pdf_for_point(
   # Поля страницы
   ws.page_margins.left = 0.4
   ws.page_margins.right = 0.4
-  ws.page_margins.top = 0.3
+  ws.page_margins.top = 0.4
   ws.page_margins.bottom = 0.3
   ws.page_margins.header = 0.0
   ws.page_margins.footer = 0.0
