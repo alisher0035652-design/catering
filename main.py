@@ -616,8 +616,9 @@ def get_dashboard():
                             <label class="text-xs font-medium text-gray-600 block">Кол-во дней:</label>
                             <input type="number" id="daysCountInput" value="2" min="1" max="30" class="border border-gray-300 rounded-md px-3 py-2 text-sm w-20 text-center font-bold">
                         </div>
-                        <div class="self-end">
+                        <div class="self-end flex gap-2">
                             <button onclick="loadMatrixRaznaryadka()" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 transition">Сформировать</button>
+                            <button onclick="downloadRaznaryadkaExcel()" class="bg-emerald-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-emerald-700 transition">📥 Скачать Excel</button>
                         </div>
                     </div>
                 </header>
@@ -1325,6 +1326,19 @@ def get_dashboard():
                 }
             }
 
+            function downloadRaznaryadkaExcel() {
+                const dateStr = document.getElementById('targetDate').value;
+                const region = document.getElementById('regionSelect').value;
+                const daysCount = document.getElementById('daysCountInput').value || 2;
+                
+                if (!dateStr) { 
+                    alert('Выберите начальную дату'); 
+                    return; 
+                }
+                
+                window.location.href = `/api/raznaryadka/export/excel?target_date=${dateStr}&region=${region}&days_count=${daysCount}`;
+            }
+
             window.onload = loadMatrixRaznaryadka;
         </script>
     </body>
@@ -1967,7 +1981,6 @@ def get_matrix_raznaryadka(
     for point_id, point_info in points_dict.items():
       val_ch = day_fact.get(str(point_id), day_fact.get(point_id))
 
-      # Если факт на текущую дату не введен, берем факт из ближайшего предыдущего сохраненного дня
       if val_ch is None:
         last_known_fact = None
         for prev_d in sorted(fact_storage.keys(), reverse=True):
@@ -2023,3 +2036,50 @@ def get_matrix_raznaryadka(
       "points": points_list,
       "matrix": matrix_data,
   }
+
+
+# --- ЭНДПОИНТ ЭКСПОРТА МАТРИЦЫ РАЗНАРЯДКИ В EXCEL ---
+@app.get("/api/raznaryadka/export/excel")
+def export_raznaryadka_excel(
+    target_date: str, region: str = "Город", days_count: int = 2
+):
+  try:
+    data = get_matrix_raznaryadka(target_date, region, days_count)
+  except Exception as e:
+    raise HTTPException(status_code=400, detail=f"Ошибка расчета данных: {str(e)}")
+
+  points = data.get("points", [])
+  matrix = data.get("matrix", {})
+
+  rows_data = []
+  for prod_name, prod_info in matrix.items():
+    row = {"Продукт": prod_name, "Ед. изм.": prod_info["unit"]}
+    for p in points:
+      row[p["name"]] = prod_info["points_qty"].get(p["id"], 0.0)
+    row["ИТОГО К ЗАКУПКЕ"] = prod_info["weekly_total"]
+    rows_data.append(row)
+
+  df = pd.DataFrame(rows_data)
+  if df.empty:
+    columns = (
+        ["Продукт", "Ед. изм."]
+        + [p["name"] for p in points]
+        + ["ИТОГО К ЗАКУПКЕ"]
+    )
+    df = pd.DataFrame(columns=columns)
+
+  output = io.BytesIO()
+  with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    df.to_excel(writer, index=False, sheet_name="Разнарядка")
+  output.seek(0)
+
+  region_safe = "Gorod" if region == "Город" else "Rayon"
+  filename = f"Raznaryadka_{region_safe}_{target_date}_days_{days_count}.xlsx"
+
+  return StreamingResponse(
+      output,
+      media_type=(
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      ),
+      headers={"Content-Disposition": f"attachment; filename={filename}"},
+  )
