@@ -2038,7 +2038,7 @@ def get_matrix_raznaryadka(
   }
 
 
-# --- ЭНДПОИНТ ЭКСПОРТА МАТРИЦЫ РАЗНАРЯДКИ В EXCEL С НАСТРОЙКОЙ РАЗМЕРОВ СТРОК И КОЛОНОК ---
+# --- ЭНДПОИНТ ЭКСПОРТА МАТРИЦЫ РАЗНАРЯДКИ В EXCEL С ГРАНИЦАМИ И РАЗМЕРАМИ ---
 @app.get("/api/raznaryadka/export/excel")
 def export_raznaryadka_excel(
     target_date: str, region: str = "Город", days_count: int = 2
@@ -2070,27 +2070,53 @@ def export_raznaryadka_excel(
 
   output = io.BytesIO()
   
-  # Формируем Excel с помощью openpyxl для точной настройки размеров
   with pd.ExcelWriter(output, engine="openpyxl") as writer:
     df.to_excel(writer, index=False, sheet_name="Разнарядка")
     
-    # Получаем объект листа openpyxl
     worksheet = writer.sheets["Разнарядка"]
     
-    # 1. Настройка высоты строк (23px ≈ 17.25pt)
+    # Импортируем инструменты для границ
+    from openpyxl.styles import Border, Side, PatternFill, Font, Alignment
+    
+    thin_border = Border(
+        left=Side(style='thin', color='CCCCCC'),
+        right=Side(style='thin', color='CCCCCC'),
+        top=Side(style='thin', color='CCCCCC'),
+        bottom=Side(style='thin', color='CCCCCC')
+    )
+    
+    header_fill = PatternFill(start_color="E0E0E0", end_color="E0E0E0", fill_type="solid")
+    header_font = Font(bold=True)
+
+    # 1. Применяем стили, границы и выравнивание ко всей таблице
+    for row_idx, row in enumerate(worksheet.iter_rows(min_row=1, max_row=len(df) + 1, min_col=1, max_col=len(df.columns)), start=1):
+      for cell in row:
+        cell.border = thin_border
+        if row_idx == 1:
+          cell.fill = header_fill
+          cell.font = header_font
+          cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        else:
+          # Выравнивание: продукты по левому краю, остальное по центру
+          if cell.column == 1:
+            cell.alignment = Alignment(horizontal="left", vertical="center")
+          else:
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    # 2. Настройка высоты строк (23px ≈ 17.25pt)
     row_height_pt = 23 * 0.75
-    for row in range(1, len(df) + 2):  # +2 с учетом строки заголовков
+    for row in range(1, len(df) + 2):
       worksheet.row_dimensions[row].height = row_height_pt
 
-    # 2. Настройка ширины колонок
+    # 3. Настройка ширины колонок
     # Колонка A (Продукт): 150px ≈ 21.4
-    worksheet.column_dimensions['A'].width = 21.4
+    worksheet.column_dimensions['A'].width = 22.2
     
-    # Все остальные промежуточные колонки (от B до предпоследней): 60px ≈ 8.57
+    # Промежуточные колонки: 60px ≈ 8.57
     num_columns = len(df.columns)
     for col_idx in range(2, num_columns):
       col_letter = openpyxl.utils.get_column_letter(col_idx)
-      worksheet.column_dimensions[col_letter].width = 8.57
+      worksheet.column_dimensions[col_letter].width = 9.5
       
     # Последняя колонка "ИТОГО К ЗАКУПКЕ": 120px ≈ 17.14
     last_col_letter = openpyxl.utils.get_column_letter(num_columns)
