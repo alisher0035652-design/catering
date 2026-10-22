@@ -2038,7 +2038,7 @@ def get_matrix_raznaryadka(
   }
 
 
-# --- ЭНДПОИНТ ЭКСПОРТА МАТРИЦЫ РАЗНАРЯДКИ В EXCEL ---
+# --- ЭНДПОИНТ ЭКСПОРТА МАТРИЦЫ РАЗНАРЯДКИ В EXCEL С НАСТРОЙКОЙ РАЗМЕРОВ СТРОК И КОЛОНОК ---
 @app.get("/api/raznaryadka/export/excel")
 def export_raznaryadka_excel(
     target_date: str, region: str = "Город", days_count: int = 2
@@ -2069,8 +2069,33 @@ def export_raznaryadka_excel(
     df = pd.DataFrame(columns=columns)
 
   output = io.BytesIO()
+  
+  # Формируем Excel с помощью openpyxl для точной настройки размеров
   with pd.ExcelWriter(output, engine="openpyxl") as writer:
     df.to_excel(writer, index=False, sheet_name="Разнарядка")
+    
+    # Получаем объект листа openpyxl
+    worksheet = writer.sheets["Разнарядка"]
+    
+    # 1. Настройка высоты строк (23px ≈ 17.25pt)
+    row_height_pt = 23 * 0.75
+    for row in range(1, len(df) + 2):  # +2 с учетом строки заголовков
+      worksheet.row_dimensions[row].height = row_height_pt
+
+    # 2. Настройка ширины колонок
+    # Колонка A (Продукт): 150px ≈ 21.4
+    worksheet.column_dimensions['A'].width = 21.4
+    
+    # Все остальные промежуточные колонки (от B до предпоследней): 60px ≈ 8.57
+    num_columns = len(df.columns)
+    for col_idx in range(2, num_columns):
+      col_letter = openpyxl.utils.get_column_letter(col_idx)
+      worksheet.column_dimensions[col_letter].width = 8.57
+      
+    # Последняя колонка "ИТОГО К ЗАКУПКЕ": 120px ≈ 17.14
+    last_col_letter = openpyxl.utils.get_column_letter(num_columns)
+    worksheet.column_dimensions[last_col_letter].width = 17.14
+
   output.seek(0)
 
   region_safe = "Gorod" if region == "Город" else "Rayon"
