@@ -567,7 +567,7 @@ async def process_and_send_menu_in_background(
   print("✅ Все меню успешно сгенерированы и отправлены в фоновом режиме!")
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 def get_dashboard():
   html_content = """
     <!DOCTYPE html>
