@@ -1,15 +1,15 @@
+import asyncio
 from datetime import date, timedelta
-from openpyxl.drawing.image import Image
 import io
 import json
 import os
 import re
 import subprocess
-import asyncio
+
+ import openpyxl
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
-import openpyxl
 import pandas as pd
 import psycopg2
 import psycopg2.extras
@@ -24,7 +24,8 @@ _MENU_CACHE = {}
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-TELEGRAM_ADMIN_CHAT_ID = os.environ.get("TELEGRAM_ADMIN_CHAT_ID", "")  
+TELEGRAM_ADMIN_CHAT_ID = os.environ.get("TELEGRAM_ADMIN_CHAT_ID", "")
+
 
 def get_db_connection():
   database_url = os.environ.get("DATABASE_URL")
@@ -73,8 +74,8 @@ def init_db():
   conn.close()
 
 
-# Планировщик задач для ежедневной отправки меню
 scheduler = BackgroundScheduler()
+
 
 @app.on_event("startup")
 def startup_event():
@@ -443,25 +444,20 @@ def generate_menu_pdf_for_point(
 
   ws = wb[target_sheet_name]
 
-  # Заполнение данных
   ws["A1"] = formatted_date
   ws["A4"] = children_count
   ws["F1"] = point_name
 
-  # --- НАСТРОЙКА ЦЕНТРИРОВАНИЯ И ОТСТУПОВ ---
   ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
   ws.page_setup.paperSize = ws.PAPERSIZE_A4
 
-  # Вписываем в 1 страницу по ширине и высоте
   ws.page_setup.fitToWidth = 1
   ws.page_setup.fitToHeight = 1
   ws.sheet_properties.pageSetUpPr.fitToPage = True
 
-  # Центрирование по горизонтали и вертикали
   ws.page_setup.horizontalCentered = True
   ws.page_setup.verticalCentered = True
 
-  # Поля страницы
   ws.page_margins.left = 0.4
   ws.page_margins.right = 0.4
   ws.page_margins.top = 1.5
@@ -475,7 +471,6 @@ def generate_menu_pdf_for_point(
   wb.save(temp_excel_path)
   wb.close()
 
-  # Конвертация в PDF через LibreOffice
   subprocess.run(
       [
           "libreoffice",
@@ -502,6 +497,7 @@ def generate_menu_pdf_for_point(
     return final_pdf_path
   else:
     return temp_excel_path
+
 
 def send_pdf_to_telegram(pdf_path: str, caption: str):
   target_chat_id = TELEGRAM_ADMIN_CHAT_ID or TELEGRAM_CHAT_ID
@@ -602,7 +598,7 @@ def get_dashboard():
                 <header class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center">
                     <div>
                         <h1 class="text-xl font-bold text-gray-800">Матричная разнарядка (Чистая потребность)</h1>
-                        <p class="text-sm text-gray-500 mt-1">Автоматический учет инвентаризации, приходов от MUXSIN-FAYZ и расхода</p>
+                        <p class="text-sm text-gray-500 mt-1">Автоматический учет остатков, факта детей за последние дни и приходов от MUXSIN-FAYZ</p>
                     </div>
                     <div class="mt-4 md:mt-0 flex flex-wrap items-center gap-3">
                         <div>
@@ -613,8 +609,12 @@ def get_dashboard():
                             </select>
                         </div>
                         <div>
-                            <label class="text-xs font-medium text-gray-600 block">Дата недели:</label>
+                            <label class="text-xs font-medium text-gray-600 block">Начальная дата:</label>
                             <input type="date" id="targetDate" class="border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500">
+                        </div>
+                        <div>
+                            <label class="text-xs font-medium text-gray-600 block">Кол-во дней:</label>
+                            <input type="number" id="daysCountInput" value="2" min="1" max="30" class="border border-gray-300 rounded-md px-3 py-2 text-sm w-20 text-center font-bold">
                         </div>
                         <div class="self-end">
                             <button onclick="loadMatrixRaznaryadka()" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 transition">Сформировать</button>
@@ -622,7 +622,7 @@ def get_dashboard():
                     </div>
                 </header>
                 <div id="matrixResultContainer" class="space-y-6">
-                    <div class="bg-white shadow rounded-lg p-8 text-center text-gray-400">Выберите дату и нажмите «Сформировать».</div>
+                    <div class="bg-white shadow rounded-lg p-8 text-center text-gray-400">Выберите параметры и нажмите «Сформировать».</div>
                 </div>
             </div>
 
@@ -653,7 +653,6 @@ def get_dashboard():
                     </div>
                 </header>
 
-                <!-- Блок скачивания посещаемости детей по МТТ (Дни по колонке A, МТТ в шапке) -->
                 <div class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center border-l-4 border-purple-500">
                     <div>
                         <h3 class="font-bold text-gray-800 text-md">📊 Скачать посещаемость детей (Дни по вертикали, МТТ в шапке)</h3>
@@ -1267,12 +1266,13 @@ def get_dashboard():
             async function loadMatrixRaznaryadka() {
                 const dateStr = document.getElementById('targetDate').value;
                 const region = document.getElementById('regionSelect').value;
+                const daysCount = document.getElementById('daysCountInput').value || 2;
                 const container = document.getElementById('matrixResultContainer');
                 if (!dateStr) { alert('Выберите дату'); return; }
-                container.innerHTML = '<div class="text-center py-12 text-gray-500">Формирование точной закупки (с учетом MUXSIN-FAYZ)...</div>';
+                container.innerHTML = '<div class="text-center py-12 text-gray-500">Формирование точной закупки (с учетом динамического выбора дней и факта детей)...</div>';
 
                 try {
-                    const response = await fetch(`/api/raznaryadka/matrix/${dateStr}?region=${region}`);
+                    const response = await fetch(`/api/raznaryadka/matrix/${dateStr}?region=${region}&days_count=${daysCount}`);
                     const data = await response.json();
                     let html = `
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
@@ -1285,7 +1285,7 @@ def get_dashboard():
                                 <p class="text-lg font-bold text-gray-800 mt-1">${data.inv_date ? data.inv_date : 'Нет актов'}</p>
                             </div>
                             <div class="bg-white shadow rounded-lg p-6 border-t-4 border-purple-500">
-                                <h3 class="text-sm font-medium text-gray-500">Рабочих дней</h3>
+                                <h3 class="text-sm font-medium text-gray-500">Учтено рабочих дней</h3>
                                 <p class="text-lg font-bold text-purple-600 mt-1">${data.working_days_count} дней</p>
                             </div>
                         </div>
@@ -1302,7 +1302,7 @@ def get_dashboard():
                                             <th class="px-3 py-3 text-center font-bold text-gray-700 border-r bg-gray-100 min-w-[70px]">Ед.</th>
                     `;
                     data.points.forEach(point => {
-                        html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]">${point.name}<br><span class="text-[10px] text-blue-600">(${point.children_count} дет)</span></th>`;
+                        html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]">${point.name}<br><span class="text-[10px] text-blue-600">(по факту)</span></th>`;
                     });
                     html += `<th class="px-4 py-3 text-center font-bold text-blue-800 bg-blue-50">ИТОГО К ЗАКУПКЕ</th></tr></thead><tbody class="divide-y divide-gray-200 bg-white">`;
 
@@ -1348,7 +1348,6 @@ def get_fact_report(report_date: str, region: str = "Город"):
   for pid, pinfo in points_dict.items():
     child_cnt = saved_fact_children.get(str(pid))
     if child_cnt is None:
-      # По умолчанию ставим 0, если факт еще не был сохранен
       child_cnt = saved_fact_children.get(pid, 0)
     else:
       child_cnt = int(child_cnt)
@@ -1392,6 +1391,7 @@ def get_fact_report(report_date: str, region: str = "Город"):
       "fact_children": saved_fact_children,
       "fact_consumption": fact_consumption,
   }
+
 
 @app.get("/api/fact/saved-days")
 def get_saved_days_list(region: str = "Город"):
@@ -1692,7 +1692,11 @@ def export_children_matrix_excel(month: str, region: str = "Город"):
           val = saved_day_fact.get(pid, pinfo["children_count"])
 
         try:
-          num_val = int(float(val)) if val != "" and val is not None else int(pinfo["children_count"])
+          num_val = (
+              int(float(val))
+              if val != "" and val is not None
+              else int(pinfo["children_count"])
+          )
         except Exception:
           num_val = 0
 
@@ -1710,7 +1714,6 @@ def export_children_matrix_excel(month: str, region: str = "Город"):
       df.to_excel(writer, index=False, sheet_name=f"Дети_{region}_{month}")
     output.seek(0)
 
-    # Безопасное имя файла на английском, чтобы избежать ошибок кодировки HTTP-заголовков
     region_safe = "Gorod" if region == "Город" else "Rayon"
 
     return StreamingResponse(
@@ -1729,6 +1732,7 @@ def export_children_matrix_excel(month: str, region: str = "Город"):
     raise HTTPException(
         status_code=500, detail=f"Ошибка генерации файла: {str(e)}"
     )
+
 
 @app.post("/api/menu/generate-and-send")
 def generate_and_send_menu_api(
@@ -1836,15 +1840,34 @@ def save_setting_api(data: dict):
   return {"status": "success"}
 
 
+# --- ОБНОВЛЕННЫЙ ЭНДПОИНТ МАТРИЦЫ РАЗНАРЯДКИ ---
 @app.get("/api/raznaryadka/matrix/{target_date}")
-def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
+def get_matrix_raznaryadka(
+    target_date: str, region: str = "Город", days_count: int = 2
+):
   try:
     parsed_date = date.fromisoformat(target_date)
   except ValueError:
-    raise HTTPException(status_code=400, detail="Неверный формат дат")
+    raise HTTPException(status_code=400, detail="Неверный формат даты")
 
-  start_of_week = parsed_date - timedelta(days=parsed_date.weekday())
-  week_days = [start_of_week + timedelta(days=i) for i in range(5)]
+  # 1. Формируем динамический список целевых рабочих дней на N дней вперед
+  target_days = []
+  curr = parsed_date
+  while len(target_days) < days_count:
+    m_num = get_menu_number_for_date_custom(curr)
+    if m_num is not None:
+      target_days.append((curr, m_num))
+    curr += timedelta(days=1)
+    if (curr - parsed_date).days > 90:
+      break
+
+  if not target_days:
+    raise HTTPException(
+        status_code=400, detail="В выбранном периоде нет рабочих дней"
+    )
+
+  week_start_str = target_days[0][0].isoformat()
+  week_end_str = target_days[-1][0].isoformat()
 
   points_dict = load_points_from_excel(region)
   points_list = [
@@ -1856,9 +1879,10 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
       for pid, pinfo in points_dict.items()
   ]
 
+  # 2. Получаем актуальную инвентаризацию
   stock_storage = load_stock_settings()
   available_inv_dates = sorted(
-      [d for d in stock_storage.keys() if d <= start_of_week.isoformat()]
+      [d for d in stock_storage.keys() if d <= week_start_str]
   )
   inv_date_used = None
   initial_stock = {}
@@ -1866,13 +1890,14 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
     inv_date_used = available_inv_dates[-1]
     initial_stock = stock_storage[inv_date_used].get(region, {})
 
+  # 3. Приходы MUXSIN-FAYZ от даты инвентаризации до первого целевого дня
   purchases_storage = load_purchases_settings().get(region, {})
   purchases_between = {}
-
   inv_dt = (
       date.fromisoformat(inv_date_used) if inv_date_used else date(2000, 1, 1)
   )
-  end_prev_period = start_of_week - timedelta(days=1)
+  first_target_date = target_days[0][0]
+  end_prev_period = first_target_date - timedelta(days=1)
 
   for pid, p_list in purchases_storage.items():
     for p in p_list:
@@ -1885,17 +1910,24 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
             purchases_between[pid].get(prod, 0.0) + p.get("qty", 0.0)
         )
 
+  # 4. Расход продуктов за прошлые дни
+  fact_storage = load_fact_children_settings()
   consumed_between = {}
   if inv_date_used:
     inv_dt_real = date.fromisoformat(inv_date_used)
-    if inv_dt_real < start_of_week:
+    if inv_dt_real < first_target_date:
       curr_d = inv_dt_real
       while curr_d <= end_prev_period:
         menu_num = get_menu_number_for_date_custom(curr_d)
         if menu_num is not None:
           day_menu = load_menu_from_excel(menu_num)
+          day_fact = fact_storage.get(curr_d.isoformat(), {}).get(region, {})
           for pid, pinfo in points_dict.items():
-            children = pinfo["children_count"]
+            val_ch = day_fact.get(str(pid), day_fact.get(pid))
+            children = (
+                int(val_ch) if val_ch is not None else pinfo["children_count"]
+            )
+
             if pid not in consumed_between:
               consumed_between[pid] = {}
             for prod_name, pdata in day_menu.items():
@@ -1904,6 +1936,7 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
               ) + (pdata.get("qty_per_child", 0.0) * children)
         curr_d += timedelta(days=1)
 
+  # 5. Вычисление доступных остатков на складах МТТ
   effective_stock = {}
   for pid in points_dict.keys():
     effective_stock[pid] = {}
@@ -1914,22 +1947,45 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
         list(p_init.keys()) + list(p_purch.keys()) + list(p_cons.keys())
     )
     for prod in all_prods:
-      init_val = p_init.get(prod, 0.0)
-      purch_val = p_purch.get(prod, 0.0)
-      cons_val = p_cons.get(prod, 0.0)
+      init_val = float(p_init.get(prod, 0.0) or 0.0)
+      purch_val = float(p_purch.get(prod, 0.0) or 0.0)
+      cons_val = float(p_cons.get(prod, 0.0) or 0.0)
       net_stock = (init_val + purch_val) - cons_val
       effective_stock[pid][prod] = net_stock
 
+  # 6. Расчет валовой потребности по дням на основе факта детей
   matrix_data = {}
   working_days_count = 0
-  for day in week_days:
-    menu_num = get_menu_number_for_date_custom(day)
-    if menu_num is None:
-      continue
+
+  for day_obj, menu_num in target_days:
     working_days_count += 1
+    d_str = day_obj.isoformat()
+
+    day_fact = fact_storage.get(d_str, {}).get(region, {})
+
     ttk_items = load_menu_from_excel(menu_num)
     for point_id, point_info in points_dict.items():
-      children = point_info["children_count"]
+      val_ch = day_fact.get(str(point_id), day_fact.get(point_id))
+
+      # Если факт на текущую дату не введен, берем факт из ближайшего предыдущего сохраненного дня
+      if val_ch is None:
+        last_known_fact = None
+        for prev_d in sorted(fact_storage.keys(), reverse=True):
+          if prev_d <= d_str and region in fact_storage[prev_d]:
+            p_val = fact_storage[prev_d][region].get(
+                str(point_id), fact_storage[prev_d][region].get(point_id)
+            )
+            if p_val is not None:
+              last_known_fact = int(p_val)
+              break
+        children = (
+            last_known_fact
+            if last_known_fact is not None
+            else point_info["children_count"]
+        )
+      else:
+        children = int(val_ch)
+
       for prod_name, data in ttk_items.items():
         kg_per_child = data.get("qty_per_child", 0.0)
         unit = data["unit"]
@@ -1942,6 +1998,7 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
           }
         matrix_data[prod_name]["points_qty"][point_id] += needed
 
+  # 7. Вычитание текущих остатков и формирование итоговой потребности
   for prod_name, prod_info in matrix_data.items():
     weekly_sum = 0.0
     for pid in points_dict.keys():
@@ -1958,8 +2015,8 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город"):
     prod_info["weekly_total"] = round(weekly_sum, 2)
 
   return {
-      "week_start": week_days[0].isoformat(),
-      "week_end": week_days[4].isoformat(),
+      "week_start": week_start_str,
+      "week_end": week_end_str,
       "region": region,
       "inv_date": inv_date_used,
       "working_days_count": working_days_count,
