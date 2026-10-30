@@ -648,7 +648,7 @@ def get_dashboard():
                         <div class="self-end flex flex-wrap gap-2">
                             <button onclick="saveFactChildren()" class="bg-green-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-green-700 transition">💾 Сохранить факт</button>
                             <button onclick="downloadFactExcel()" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 transition">📥 Скачать факт (День)</button>
-                            <button onclick="downloadFactAllRegionsExcel()" class="bg-emerald-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-emerald-700 transition">📥 Скачать факт (Город + Район)</button>
+                            <button onclick="downloadFactAllRegionsExcel()" class="bg-emerald-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-emerald-700 transition">📥 Скачать факт</button>
                             <button onclick="sendMenuTelegramManual()" class="bg-indigo-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-indigo-700 transition">📤 Отправить меню в Telegram</button>
                         </div>
                     </div>
@@ -656,12 +656,12 @@ def get_dashboard():
 
                 <div class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center border-l-4 border-purple-500">
                     <div>
-                        <h3 class="font-bold text-gray-800 text-md">📊 Скачать посещаемость детей (Дни по вертикали, МТТ в шапке)</h3>
+                        <h3 class="font-bold text-gray-800 text-md">📊 Скачать посещаемость детей</h3>
                         <p class="text-xs text-gray-500 mt-0.5">Выберите месяц для формирования сводной таблицы посещаемости</p>
                     </div>
                     <div class="mt-3 md:mt-0 flex items-center gap-3">
                         <input type="month" id="childrenMonthPicker" class="border border-gray-300 rounded-md px-3 py-2 text-sm">
-                        <button onclick="downloadChildrenMatrixExcel()" class="bg-purple-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-purple-700 transition">📥 Скачать детей (МТТ)</button>
+                        <button onclick="downloadChildrenMatrixExcel()" class="bg-purple-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-purple-700 transition">📥 Скачать детей</button>
                     </div>
                 </div>
 
