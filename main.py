@@ -404,6 +404,21 @@ def load_menu_from_excel(menu_num: int) -> dict:
     return {}
 
 
+def load_all_nomenclature_periodicities() -> dict:
+  """Загружает соответствие продуктов и периодичности из листа 'Все номенклатуры'."""
+  mapping = {}
+  try:
+    df = pd.read_excel("Menu.xlsx", sheet_name="Все номенклатуры")
+    for _, row in df.iterrows():
+      prod = str(row.iloc[0]).strip()
+      period = str(row.iloc[1]).strip()
+      if prod and prod != "nan":
+        mapping[prod] = period
+  except Exception as e:
+    print(f"Ошибка чтения листа 'Все номенклатуры': {e}")
+  return mapping
+
+
 def get_all_products_with_units() -> dict:
   products = {}
   for i in range(1, 11):
@@ -622,6 +637,16 @@ def get_dashboard():
                         </div>
                     </div>
                 </header>
+
+                <!-- ПАНЕЛЬ КНОПОК ФИЛЬТРАЦИИ ПО ПЕРИОДИЧНОСТИ -->
+                <div class="bg-white shadow rounded-lg p-4 flex flex-wrap items-center gap-2">
+                    <span class="text-xs font-bold text-gray-500 mr-2">Фильтр по номенклатуре:</span>
+                    <button onclick="setMatrixFilter('ALL')" id="filterBtnALL" class="px-3 py-1.5 rounded-md text-xs font-bold bg-blue-600 text-white transition">Все позиции</button>
+                    <button onclick="setMatrixFilter('Ежедневно')" id="filterBtnЕжедневно" class="px-3 py-1.5 rounded-md text-xs font-bold bg-gray-200 text-gray-700 hover:bg-gray-300 transition">Ежедневно</button>
+                    <button onclick="setMatrixFilter('Неделья')" id="filterBtnНеделья" class="px-3 py-1.5 rounded-md text-xs font-bold bg-gray-200 text-gray-700 hover:bg-gray-300 transition">Неделья</button>
+                    <button onclick="setMatrixFilter('Месяц')" id="filterBtnМесяц" class="px-3 py-1.5 rounded-md text-xs font-bold bg-gray-200 text-gray-700 hover:bg-gray-300 transition">Месяц</button>
+                </div>
+
                 <div id="matrixResultContainer" class="space-y-6">
                     <div class="bg-white shadow rounded-lg p-8 text-center text-gray-400">Выберите параметры и нажмите «Сформировать».</div>
                 </div>
@@ -806,6 +831,7 @@ def get_dashboard():
             let viewYear = now.getFullYear();
             let viewMonth = now.getMonth();
             let selectedDateStr = '';
+            let currentMatrixFilter = 'ALL';
 
             function switchTab(tab) {
                 ['matrix', 'fact', 'balance', 'calendar', 'stock'].forEach(t => {
@@ -826,6 +852,21 @@ def get_dashboard():
             }
 
             function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+
+            function setMatrixFilter(filterVal) {
+                currentMatrixFilter = filterVal;
+                ['ALL', 'Ежедневно', 'Неделья', 'Месяц'].forEach(f => {
+                    const btn = document.getElementById('filterBtn' + f);
+                    if (btn) {
+                        if (f === filterVal) {
+                            btn.className = "px-3 py-1.5 rounded-md text-xs font-bold bg-blue-600 text-white transition";
+                        } else {
+                            btn.className = "px-3 py-1.5 rounded-md text-xs font-bold bg-gray-200 text-gray-700 hover:bg-gray-300 transition";
+                        }
+                    }
+                });
+                loadMatrixRaznaryadka();
+            }
 
             function changeMonth(dir) {
                 viewMonth += dir;
@@ -1273,7 +1314,7 @@ def get_dashboard():
                 container.innerHTML = '<div class="text-center py-12 text-gray-500">Формирование точной закупки (с учетом динамического выбора дней и факта детей)...</div>';
 
                 try {
-                    const response = await fetch(`/api/raznaryadka/matrix/${dateStr}?region=${region}&days_count=${daysCount}`);
+                    const response = await fetch(`/api/raznaryadka/matrix/${dateStr}?region=${region}&days_count=${daysCount}&filter_period=${currentMatrixFilter}`);
                     const data = await response.json();
                     let html = `
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
@@ -1292,8 +1333,8 @@ def get_dashboard():
                         </div>
 
                         <div class="bg-white shadow rounded-lg overflow-hidden">
-                            <div class="bg-gray-50 px-6 py-4 border-b border-gray-200">
-                                <h3 class="text-lg font-medium text-gray-900">📊 Чистая потребность к закупке</h3>
+                            <div class="bg-gray-50 px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+                                <h3 class="text-lg font-medium text-gray-900">📊 Чистая потребность к закупке <span class="text-xs text-blue-600 font-bold">(Фильтр: ${currentMatrixFilter})</span></h3>
                             </div>
                             <div class="overflow-x-auto" style="max-height: 700px;">
                                 <table class="min-w-full divide-y divide-gray-200 text-xs border-collapse">
@@ -1317,7 +1358,7 @@ def get_dashboard():
                             const val = rowData.points_qty[point.id] || 0;
                             html += `<td class="px-3 py-3 text-center border-r text-gray-700 ${val > 0 ? 'font-semibold text-blue-600' : 'text-gray-300'}">${val > 0 ? val : '-'}</td>`;
                         });
-                        html += `<td class="px-4 py-3 text-center font-bold text-blue-900 bg-blue-50">${rowData.weekly_total}</td></tr>`;
+                        html += `<td class="px-4 py-3 text-center font-bold text-blue-900 bg-green-50">${rowData.weekly_total}</td></tr>`;
                     }
                     html += `</tbody></table></div></div>`;
                     container.innerHTML = html;
@@ -1336,7 +1377,7 @@ def get_dashboard():
                     return; 
                 }
                 
-                window.location.href = `/api/raznaryadka/export/excel?target_date=${dateStr}&region=${region}&days_count=${daysCount}`;
+                window.location.href = `/api/raznaryadka/export/excel?target_date=${dateStr}&region=${region}&days_count=${daysCount}&filter_period=${currentMatrixFilter}`;
             }
 
             window.onload = loadMatrixRaznaryadka;
@@ -1854,10 +1895,13 @@ def save_setting_api(data: dict):
   return {"status": "success"}
 
 
-# --- ОБНОВЛЕННЫЙ ЭНДПОИНТ МАТРИЦЫ РАЗНАРЯДКИ ---
+# --- ОБНОВЛЕННЫЙ ЭНДПОИНТ МАТРИЦЫ РАЗНАРЯДКИ С ФИЛЬТРАЦИЕЙ ---
 @app.get("/api/raznaryadka/matrix/{target_date}")
 def get_matrix_raznaryadka(
-    target_date: str, region: str = "Город", days_count: int = 2
+    target_date: str,
+    region: str = "Город",
+    days_count: int = 2,
+    filter_period: str = "ALL",
 ):
   try:
     parsed_date = date.fromisoformat(target_date)
@@ -2027,6 +2071,22 @@ def get_matrix_raznaryadka(
       weekly_sum += net_qty
     prod_info["weekly_total"] = round(weekly_sum, 2)
 
+  # 8. Фильтрация по периодичности из листа "Все номенклатуры"
+  if filter_period and filter_period != "ALL":
+    periodicities = load_all_nomenclature_periodicities()
+    filtered_matrix = {}
+    for prod_name, prod_info in matrix_data.items():
+      # Ищем соответствие по точному совпадению или без учета регистра/пробелов
+      prod_mapped_period = None
+      for p_key, p_val in periodicities.items():
+        if p_key.strip().lower() == prod_name.strip().lower():
+          prod_mapped_period = p_val
+          break
+
+      if prod_mapped_period and prod_mapped_period.lower() == filter_period.lower():
+        filtered_matrix[prod_name] = prod_info
+    matrix_data = filtered_matrix
+
   return {
       "week_start": week_start_str,
       "week_end": week_end_str,
@@ -2038,13 +2098,16 @@ def get_matrix_raznaryadka(
   }
 
 
-# --- ЭНДПОИНТ ЭКСПОРТА МАТРИЦЫ РАЗНАРЯДКИ В EXCEL С ГРАНИЦАМИ И РАЗМЕРАМИ ---
+# --- ЭНДПОИНТ ЭКСПОРТА МАТРИЦЫ РАЗНАРЯДКИ В EXCEL С ФИЛЬТРОМ И СТИЛИЗАЦИЕЙ ---
 @app.get("/api/raznaryadka/export/excel")
 def export_raznaryadka_excel(
-    target_date: str, region: str = "Город", days_count: int = 2
+    target_date: str,
+    region: str = "Город",
+    days_count: int = 2,
+    filter_period: str = "ALL",
 ):
   try:
-    data = get_matrix_raznaryadka(target_date, region, days_count)
+    data = get_matrix_raznaryadka(target_date, region, days_count, filter_period)
   except Exception as e:
     raise HTTPException(status_code=400, detail=f"Ошибка расчета данных: {str(e)}")
 
@@ -2069,56 +2132,60 @@ def export_raznaryadka_excel(
     df = pd.DataFrame(columns=columns)
 
   output = io.BytesIO()
-  
+
   with pd.ExcelWriter(output, engine="openpyxl") as writer:
     df.to_excel(writer, index=False, sheet_name="Разнарядка")
-    
+
     worksheet = writer.sheets["Разнарядка"]
-    
-    # Импортируем инструменты для границ
-    from openpyxl.styles import Border, Side, PatternFill, Font, Alignment
-    
+
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
     thin_border = Border(
-        left=Side(style='thin', color='CCCCCC'),
-        right=Side(style='thin', color='CCCCCC'),
-        top=Side(style='thin', color='CCCCCC'),
-        bottom=Side(style='thin', color='CCCCCC')
+        left=Side(style="thin", color="CCCCCC"),
+        right=Side(style="thin", color="CCCCCC"),
+        top=Side(style="thin", color="CCCCCC"),
+        bottom=Side(style="thin", color="CCCCCC"),
     )
-    
-    header_fill = PatternFill(start_color="E0E0E0", end_color="E0E0E0", fill_type="solid")
+
+    header_fill = PatternFill(
+        start_color="E0E0E0", end_color="E0E0E0", fill_type="solid"
+    )
     header_font = Font(bold=True)
 
-    # 1. Применяем стили, границы и выравнивание ко всей таблице
-    for row_idx, row in enumerate(worksheet.iter_rows(min_row=1, max_row=len(df) + 1, min_col=1, max_col=len(df.columns)), start=1):
+    for row_idx, row in enumerate(
+        worksheet.iter_rows(
+            min_row=1,
+            max_row=len(df) + 1,
+            min_col=1,
+            max_col=len(df.columns),
+        ),
+        start=1,
+    ):
       for cell in row:
         cell.border = thin_border
         if row_idx == 1:
           cell.fill = header_fill
           cell.font = header_font
-          cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+          cell.alignment = Alignment(
+              horizontal="center", vertical="center", wrap_text=True
+          )
         else:
-          # Выравнивание: продукты по левому краю, остальное по центру
           if cell.column == 1:
             cell.alignment = Alignment(horizontal="left", vertical="center")
           else:
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    # 2. Настройка высоты строк (23px ≈ 17.25pt)
     row_height_pt = 23 * 0.75
     for row in range(1, len(df) + 2):
       worksheet.row_dimensions[row].height = row_height_pt
 
-    # 3. Настройка ширины колонок
-    # Колонка A (Продукт): 150px ≈ 21.4
-    worksheet.column_dimensions['A'].width = 22.2
-    
-    # Промежуточные колонки: 60px ≈ 8.57
+    worksheet.column_dimensions["A"].width = 22.2
+
     num_columns = len(df.columns)
     for col_idx in range(2, num_columns):
       col_letter = openpyxl.utils.get_column_letter(col_idx)
       worksheet.column_dimensions[col_letter].width = 9.5
-      
-    # Последняя колонка "ИТОГО К ЗАКУПКЕ": 120px ≈ 17.14
+
     last_col_letter = openpyxl.utils.get_column_letter(num_columns)
     worksheet.column_dimensions[last_col_letter].width = 17.14
 
