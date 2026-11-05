@@ -1329,21 +1329,21 @@ def get_dashboard():
                 try {
                     const response = await fetch(`/api/raznaryadka/matrix/${dateStr}?region=${region}&days_count=${daysCount}&filter_period=${currentMatrixFilter}`);
                     const data = await response.json();
-                    let html = `
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
-                            <div class="bg-white shadow rounded-lg p-6 border-t-4 border-blue-500">
-                                <h3 class="text-sm font-medium text-gray-500">Период закупки</h3>
-                                <p class="text-lg font-bold text-gray-800 mt-1">${data.week_start} — ${data.week_end}</p>
-                            </div>
-                            <div class="bg-white shadow rounded-lg p-6 border-t-4 border-green-500">
-                                <h3 class="text-sm font-medium text-gray-500">Инвентаризация (база)</h3>
-                                <p class="text-lg font-bold text-gray-800 mt-1">${data.inv_date ? data.inv_date : 'Нет актов'}</p>
-                            </div>
-                            <div class="bg-white shadow rounded-lg p-6 border-t-4 border-purple-500">
-                                <h3 class="text-sm font-medium text-gray-500">Учтено рабочих дней</h3>
-                                <p class="text-lg font-bold text-purple-600 mt-1">${data.working_days_count} дней</p>
-                            </div>
-                        </div>
+                   let html = `
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                <div class="bg-white shadow rounded-lg p-6 border-t-4 border-blue-500">
+                    <h3 class="text-sm font-medium text-gray-500">Период закупки</h3>
+                    <p class="text-lg font-bold text-gray-800 mt-1">${data.week_start} - ${data.week_end}</p>
+                </div>
+                <div class="bg-white shadow rounded-lg p-6 border-t-4 border-green-500">
+                    <h3 class="text-sm font-medium text-gray-500">Инвентаризация (база)</h3>
+                    <p class="text-lg font-bold text-gray-800 mt-1">${data.inv_date ? data.inv_date : 'Нет актов'}</p>
+                </div>
+                <div class="bg-white shadow rounded-lg p-6 border-t-4 border-purple-500">
+                    <h3 class="text-sm font-medium text-gray-500">Учтено рабочих дней</h3>
+                    <p class="text-lg font-bold text-purple-600 mt-1">${data.working_days_count} дней</p>
+                </div>
+            </div>
 
                         <div class="bg-white shadow rounded-lg overflow-hidden">
                             <div class="bg-gray-50 px-6 py-4 border-b border-gray-200 flex justify-between items-center">
