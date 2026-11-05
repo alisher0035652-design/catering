@@ -405,7 +405,6 @@ def load_menu_from_excel(menu_num: int) -> dict:
 
 
 def load_all_nomenclature_periodicities() -> dict:
-  """Загружает соответствие продуктов и периодичности из листа 'Все номенклатуры'."""
   mapping = {}
   try:
     df = pd.read_excel("Menu.xlsx", sheet_name="Все номенклатуры")
@@ -610,12 +609,26 @@ def get_dashboard():
             </nav>
 
             <div id="tabMatrix" class="space-y-6">
-                <header class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center">
+                <header class="bg-white shadow rounded-lg p-6 flex flex-col justify-between">
                     <div>
                         <h1 class="text-xl font-bold text-gray-800">Матричная разнарядка (Чистая потребность)</h1>
                         <p class="text-sm text-gray-500 mt-1">Автоматический учет остатков, факта детей за последние дни и приходов от MUXSIN-FAYZ</p>
                     </div>
-                    <div class="mt-4 md:mt-0 flex flex-wrap items-center gap-3">
+                </header>
+
+                <!-- ЕДИНАЯ ПАНЕЛЬ: Фильтры номенклатуры + Параметры + Кнопки управления -->
+                <div class="bg-white shadow rounded-lg p-4 flex flex-wrap items-center justify-between gap-4">
+                    <!-- Кнопки фильтрации номенклатуры -->
+                    <div class="flex flex-wrap items-center gap-2">
+                        <span class="text-xs font-bold text-gray-500 mr-1">Номенклатура:</span>
+                        <button onclick="setMatrixFilter('ALL')" id="filterBtnALL" class="px-3 py-2 rounded-md text-xs font-bold bg-blue-600 text-white transition">Все позиции</button>
+                        <button onclick="setMatrixFilter('Ежедневно')" id="filterBtnЕжедневно" class="px-3 py-2 rounded-md text-xs font-bold bg-gray-200 text-gray-700 hover:bg-gray-300 transition">Ежедневно</button>
+                        <button onclick="setMatrixFilter('Неделья')" id="filterBtnНеделья" class="px-3 py-2 rounded-md text-xs font-bold bg-gray-200 text-gray-700 hover:bg-gray-300 transition">Неделья</button>
+                        <button onclick="setMatrixFilter('Месяц')" id="filterBtnМесяц" class="px-3 py-2 rounded-md text-xs font-bold bg-gray-200 text-gray-700 hover:bg-gray-300 transition">Месяц</button>
+                    </div>
+
+                    <!-- Параметры и кнопки действий -->
+                    <div class="flex flex-wrap items-center gap-3">
                         <div>
                             <label class="text-xs font-medium text-gray-600 block">Регион:</label>
                             <select id="regionSelect" class="border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500">
@@ -636,15 +649,6 @@ def get_dashboard():
                             <button onclick="downloadRaznaryadkaExcel()" class="bg-emerald-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-emerald-700 transition">📥 Скачать Excel</button>
                         </div>
                     </div>
-                </header>
-
-                <!-- ПАНЕЛЬ КНОПОК ФИЛЬТРАЦИИ ПО ПЕРИОДИЧНОСТИ -->
-                <div class="bg-white shadow rounded-lg p-4 flex flex-wrap items-center gap-2">
-                    <span class="text-xs font-bold text-gray-500 mr-2">Фильтр по номенклатуре:</span>
-                    <button onclick="setMatrixFilter('ALL')" id="filterBtnALL" class="px-3 py-1.5 rounded-md text-xs font-bold bg-blue-600 text-white transition">Все позиции</button>
-                    <button onclick="setMatrixFilter('Ежедневно')" id="filterBtnЕжедневно" class="px-3 py-1.5 rounded-md text-xs font-bold bg-gray-200 text-gray-700 hover:bg-gray-300 transition">Ежедневно</button>
-                    <button onclick="setMatrixFilter('Неделья')" id="filterBtnНеделья" class="px-3 py-1.5 rounded-md text-xs font-bold bg-gray-200 text-gray-700 hover:bg-gray-300 transition">Неделья</button>
-                    <button onclick="setMatrixFilter('Месяц')" id="filterBtnМесяц" class="px-3 py-1.5 rounded-md text-xs font-bold bg-gray-200 text-gray-700 hover:bg-gray-300 transition">Месяц</button>
                 </div>
 
                 <div id="matrixResultContainer" class="space-y-6">
@@ -855,17 +859,26 @@ def get_dashboard():
 
             function setMatrixFilter(filterVal) {
                 currentMatrixFilter = filterVal;
+                
                 ['ALL', 'Ежедневно', 'Неделья', 'Месяц'].forEach(f => {
                     const btn = document.getElementById('filterBtn' + f);
                     if (btn) {
                         if (f === filterVal) {
-                            btn.className = "px-3 py-1.5 rounded-md text-xs font-bold bg-blue-600 text-white transition";
+                            btn.className = "px-3 py-2 rounded-md text-xs font-bold bg-blue-600 text-white transition";
                         } else {
-                            btn.className = "px-3 py-1.5 rounded-md text-xs font-bold bg-gray-200 text-gray-700 hover:bg-gray-300 transition";
+                            btn.className = "px-3 py-2 rounded-md text-xs font-bold bg-gray-200 text-gray-700 hover:bg-gray-300 transition";
                         }
                     }
                 });
-                loadMatrixRaznaryadka();
+
+                const daysInput = document.getElementById('daysCountInput');
+                if (filterVal === 'Ежедневно') {
+                    daysInput.value = 1;
+                } else if (filterVal === 'Неделья') {
+                    daysInput.value = 5;
+                } else if (filterVal === 'Месяц') {
+                    daysInput.value = 10;
+                }
             }
 
             function changeMonth(dir) {
@@ -1311,7 +1324,7 @@ def get_dashboard():
                 const daysCount = document.getElementById('daysCountInput').value || 2;
                 const container = document.getElementById('matrixResultContainer');
                 if (!dateStr) { alert('Выберите дату'); return; }
-                container.innerHTML = '<div class="text-center py-12 text-gray-500">Формирование точной закупки (с учетом динамического выбора дней и факта детей)...</div>';
+                container.innerHTML = '<div class="text-center py-12 text-gray-500">Формирование точной закупки (с учетом фильтра и дней)...</div>';
 
                 try {
                     const response = await fetch(`/api/raznaryadka/matrix/${dateStr}?region=${region}&days_count=${daysCount}&filter_period=${currentMatrixFilter}`);
@@ -1895,7 +1908,7 @@ def save_setting_api(data: dict):
   return {"status": "success"}
 
 
-# --- ОБНОВЛЕННЫЙ ЭНДПОИНТ МАТРИЦЫ РАЗНАРЯДКИ С ПРАВИЛЬНОЙ ЛОГИКОЙ РАСЧЕТА И ФИЛЬТРАЦИЕЙ ---
+# --- ЭНДПОИНТ МАТРИЦЫ РАЗНАРЯДКИ С ПОДНЕВНЫМ УЧЕТОМ И ФИЛЬТРАЦИЕЙ ---
 @app.get("/api/raznaryadka/matrix/{target_date}")
 def get_matrix_raznaryadka(
     target_date: str,
@@ -1968,7 +1981,7 @@ def get_matrix_raznaryadka(
             purchases_between[pid].get(prod, 0.0) + p.get("qty", 0.0)
         )
 
-  # 4. Расход продуктов за прошлые дни (от инвентаризации до начала периода)
+  # 4. Расход продуктов за прошлые дни
   fact_storage = load_fact_children_settings()
   consumed_between = {}
   if inv_date_used:
@@ -1994,7 +2007,7 @@ def get_matrix_raznaryadka(
               ) + (pdata.get("qty_per_child", 0.0) * children)
         curr_d += timedelta(days=1)
 
-  # 5. Вычисление актуальных доступных остатков на складах МТТ к началу периода
+  # 5. Вычисление доступных остатков на складах МТТ
   effective_stock = {}
   for pid in points_dict.keys():
     effective_stock[pid] = {}
@@ -2011,13 +2024,10 @@ def get_matrix_raznaryadka(
       net_stock = (init_val + purch_val) - cons_val
       effective_stock[pid][prod] = net_stock
 
-  # 6. ПРАВИЛЬНАЯ ЛОГИКА РАСЧЕТА ПО ДНЯМ С УЧЕТОМ ОСТАТКОВ
-  # Для каждого дня рассчитывается потребность, и остаток расходуется последовательно,
-  # либо чистая потребность накапливается корректно.
+  # 6. Поддневный расчет закупки с динамическим списком детей и вычитанием остатков
   matrix_data = {}
   working_days_count = 0
 
-  # Создаем рабочую копию остатков для симуляции списания по дням
   running_stock = {}
   for pid, prods in effective_stock.items():
     running_stock[pid] = prods.copy()
@@ -2061,7 +2071,6 @@ def get_matrix_raznaryadka(
               "weekly_total": 0.0,
           }
 
-        # Вычитаем из остатка склада на точке
         point_stocks = running_stock.get(point_id, {})
         available = 0.0
         st_key_matched = None
@@ -2072,19 +2081,17 @@ def get_matrix_raznaryadka(
             break
 
         if available >= gross_needed:
-          # Остаток полностью покрывает потребность этого дня
           net_needed = 0.0
           if st_key_matched:
             running_stock[point_id][st_key_matched] -= gross_needed
         else:
-          # Остатка частично не хватает, остаток сгорает до 0, разницу нужно закупить
           net_needed = gross_needed - available
           if st_key_matched:
             running_stock[point_id][st_key_matched] = 0.0
 
-        matrix_data[prod_name]["points_qty"][point_id] += round(net_keyword_val if 'net_keyword_val' in locals() else net_needed, 2)
+        matrix_data[prod_name]["points_qty"][point_id] += round(net_needed, 2)
 
-  # Корректировка структуры matrix_data и подсчет итогов
+  # Подсчет итогов
   for prod_name, prod_info in matrix_data.items():
     weekly_sum = 0.0
     for pid in points_dict.keys():
@@ -2093,7 +2100,7 @@ def get_matrix_raznaryadka(
       weekly_sum += val
     prod_info["weekly_total"] = round(weekly_sum, 2)
 
-  # 7. Фильтрация по периодичности из листа "Все номенклатуры"
+  # 7. Фильтрация по номенклатуре ("Все номенклатуры")
   if filter_period and filter_period != "ALL":
     periodicities = load_all_nomenclature_periodicities()
     filtered_matrix = {}
@@ -2118,7 +2125,8 @@ def get_matrix_raznaryadka(
       "matrix": matrix_data,
   }
 
-# --- ЭНДПОИНТ ЭКСПОРТА МАТРИЦЫ РАЗНАРЯДКИ В EXCEL С ФИЛЬТРОМ И СТИЛИЗАЦИЕЙ ---
+
+# --- ЭНДПОИНТ ЭКСПОРТА МАТРИЦЫ РАЗНАРЯДКИ В EXCEL С ГРАНИЦАМИ И РАЗМЕРАМИ ---
 @app.get("/api/raznaryadka/export/excel")
 def export_raznaryadka_excel(
     target_date: str,
@@ -2199,12 +2207,12 @@ def export_raznaryadka_excel(
     for row in range(1, len(df) + 2):
       worksheet.row_dimensions[row].height = row_height_pt
 
-    worksheet.column_dimensions["A"].width = 22.2
+    worksheet.column_dimensions["A"].width = 21.4
 
     num_columns = len(df.columns)
     for col_idx in range(2, num_columns):
       col_letter = openpyxl.utils.get_column_letter(col_idx)
-      worksheet.column_dimensions[col_letter].width = 9.5
+      worksheet.column_dimensions[col_letter].width = 8.57
 
     last_col_letter = openpyxl.utils.get_column_letter(num_columns)
     worksheet.column_dimensions[last_col_letter].width = 17.14
