@@ -822,6 +822,10 @@ def get_dashboard():
         </div>
 
         <script>
+            // Ссылка на второй проект отгрузок
+            const SHIPPING_SERVICE_URL = "https://muxsin-fayz.onrender.com";
+            let currentMatrixData = null;
+
             document.getElementById('targetDate').valueAsDate = new Date();
             document.getElementById('stockDate').valueAsDate = new Date();
             document.getElementById('factDate').valueAsDate = new Date();
@@ -1329,38 +1333,36 @@ def get_dashboard():
                 try {
                     const response = await fetch(`/api/raznaryadka/matrix/${dateStr}?region=${region}&days_count=${daysCount}&filter_period=${currentMatrixFilter}`);
                     const data = await response.json();
-                   let html = `
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
-                <div class="bg-white shadow rounded-lg p-6 border-t-4 border-blue-500">
-                    <h3 class="text-sm font-medium text-gray-500">Период закупки</h3>
-                    <p class="text-lg font-bold text-gray-800 mt-1">${data.week_start} - ${data.week_end}</p>
-                </div>
-                <div class="bg-white shadow rounded-lg p-6 border-t-4 border-green-500">
-                    <h3 class="text-sm font-medium text-gray-500">Инвентаризация (база)</h3>
-                    <p class="text-lg font-bold text-gray-800 mt-1">${data.inv_date ? data.inv_date : 'Нет актов'}</p>
-                </div>
-                <div class="bg-white shadow rounded-lg p-6 border-t-4 border-purple-500">
-                    <h3 class="text-sm font-medium text-gray-500">Учтено рабочих дней</h3>
-                    <p class="text-lg font-bold text-purple-600 mt-1">${data.working_days_count} дней</p>
-                </div>
-            </div>
+                    currentMatrixData = data;
+
+                    let html = `
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                            <div class="bg-white shadow rounded-lg p-6 border-t-4 border-blue-500">
+                                <h3 class="text-sm font-medium text-gray-500">Период закупки</h3>
+                                <p class="text-lg font-bold text-gray-800 mt-1">${data.week_start} - ${data.week_end}</p>
+                            </div>
+                            <div class="bg-white shadow rounded-lg p-6 border-t-4 border-green-500">
+                                <h3 class="text-sm font-medium text-gray-500">Инвентаризация (база)</h3>
+                                <p class="text-lg font-bold text-gray-800 mt-1">${data.inv_date ? data.inv_date : 'Нет актов'}</p>
+                            </div>
+                            <div class="bg-white shadow rounded-lg p-6 border-t-4 border-purple-500">
+                                <h3 class="text-sm font-medium text-gray-500">Учтено рабочих дней</h3>
+                                <p class="text-lg font-bold text-purple-600 mt-1">${data.working_days_count} дней</p>
+                            </div>
+                        </div>
 
                         <div class="bg-white shadow rounded-lg overflow-hidden">
-                            <div class="bg-gray-50 px-6 py-4 border-b border-gray-200 flex justify-between items-center">
-                                <div class="bg-white shadow rounded-lg overflow-hidden">
-    <div class="bg-gray-50 px-6 py-4 border-b border-gray-200 flex flex-wrap justify-between items-center gap-3">
-        <h3 class="text-lg font-medium text-gray-900">📊 Чистая потребность к закупке <span class="text-xs text-blue-600 font-bold">(Фильтр: ${currentMatrixFilter})</span></h3>
-        
-        <!-- БЛОК ВЫБОРА МТТ И КНОПКА СОЗДАНИЯ НАКЛАДНОЙ -->
-        <div class="flex items-center gap-2">
-            <select id="createDraftMttSelect" class="border border-gray-300 rounded-md px-3 py-1.5 text-xs font-bold focus:ring-2 focus:ring-amber-500">
-                <!-- Заполняется автоматически при расчете -->
-            </select>
-            <button onclick="createDraftSaleDocument()" class="bg-amber-600 text-white px-3 py-1.5 rounded-md text-xs font-bold hover:bg-amber-700 transition flex items-center gap-1 shadow-sm">
-                📄 Создать накладную
-            </button>
-        </div>
-</div>
+                            <div class="bg-gray-50 px-6 py-4 border-b border-gray-200 flex flex-wrap justify-between items-center gap-3">
+                                <h3 class="text-lg font-medium text-gray-900">📊 Чистая потребность к закупке <span class="text-xs text-blue-600 font-bold">(Фильтр: ${currentMatrixFilter})</span></h3>
+                                
+                                <!-- Блок выбора МТТ и кнопка создания накладной -->
+                                <div class="flex items-center gap-2">
+                                    <select id="createDraftMttSelect" class="border border-gray-300 rounded-md px-3 py-1.5 text-xs font-bold focus:ring-2 focus:ring-amber-500 bg-white">
+                                    </select>
+                                    <button onclick="createDraftSaleDocument()" class="bg-amber-600 text-white px-3.5 py-1.5 rounded-md text-xs font-bold hover:bg-amber-700 transition flex items-center gap-1 shadow">
+                                        📄 Создать накладную
+                                    </button>
+                                </div>
                             </div>
                             <div class="overflow-x-auto" style="max-height: 700px;">
                                 <table class="min-w-full divide-y divide-gray-200 text-xs border-collapse">
@@ -1388,8 +1390,75 @@ def get_dashboard():
                     }
                     html += `</tbody></table></div></div>`;
                     container.innerHTML = html;
+
+                    // Заполняем выпадающий список МТТ
+                    const mttSelect = document.getElementById('createDraftMttSelect');
+                    if (mttSelect && data.points) {
+                        mttSelect.innerHTML = data.points.map(p => `<option value="${p.id}" data-name="${p.name}">${p.name}</option>`).join('');
+                    }
                 } catch (err) {
                     container.innerHTML = '<div class="text-center py-12 text-red-500">Ошибка загрузки матрицы.</div>';
+                }
+            }
+
+            async function createDraftSaleDocument() {
+                if (!currentMatrixData) {
+                    alert('Сначала сформируйте разнарядку!');
+                    return;
+                }
+
+                const selectEl = document.getElementById('createDraftMttSelect');
+                if (!selectEl || !selectEl.value) {
+                    alert('Выберите МТТ для создания накладной');
+                    return;
+                }
+
+                const pointId = parseInt(selectEl.value);
+                const selectedOption = selectEl.options[selectEl.selectedIndex];
+                const mttName = selectedOption.getAttribute('data-name') || selectedOption.text;
+                const targetDate = document.getElementById('targetDate').value;
+
+                const items = [];
+                for (const [prodName, rowData] of Object.entries(currentMatrixData.matrix)) {
+                    const qty = rowData.points_qty[pointId] || 0;
+                    if (qty > 0) {
+                        items.push({
+                            product: prodName,
+                            qty: qty
+                        });
+                    }
+                }
+
+                if (items.length === 0) {
+                    alert(`Для ${mttName} нет продуктов к закупке (все значения равны 0).`);
+                    return;
+                }
+
+                if (!confirm(`Создать черновик накладной на дату ${targetDate} для ${mttName} (${items.length} позиций)?`)) {
+                    return;
+                }
+
+                try {
+                    const response = await fetch(`${SHIPPING_SERVICE_URL}/api/external/sales/create-draft`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            date: targetDate,
+                            mtt_name: mttName,
+                            organization: 'MUXSIN-FAYZ',
+                            items: items
+                        })
+                    });
+
+                    const resData = await response.json();
+
+                    if (response.ok) {
+                        alert(`✅ ${resData.message}`);
+                    } else {
+                        alert(`❌ Ошибка: ${resData.error || 'Не удалось создать накладную'}`);
+                    }
+                } catch (err) {
+                    alert(`❌ Ошибка соединения со второй системой отгрузок: ${err.message}`);
                 }
             }
 
@@ -2242,157 +2311,3 @@ def export_raznaryadka_excel(
       ),
       headers={"Content-Disposition": f"attachment; filename={filename}"},
   )
-  // Ссылка на ваш второй проект (систему отгрузок)
-const SHIPPING_SERVICE_URL = "https://muxsin-fayz.onrender.com";
-
-let currentMatrixData = null; // Хранит текущие данные расчета матрицы
-
-// Обновленная функция загрузки матрицы разнарядки (сохраняет данные и заполняет список МТТ)
-async function loadMatrixRaznaryadka() {
-    const dateStr = document.getElementById('targetDate').value;
-    const region = document.getElementById('regionSelect').value;
-    const daysCount = document.getElementById('daysCountInput').value || 2;
-    const container = document.getElementById('matrixResultContainer');
-    
-    if (!dateStr) { 
-        alert('Выберите дату'); 
-        return; 
-    }
-    
-    container.innerHTML = '<div class="text-center py-12 text-gray-500">Формирование точной закупки (с учетом фильтра и дней)...</div>';
-
-    try {
-        const response = await fetch(`/api/raznaryadka/matrix/${dateStr}?region=${region}&days_count=${daysCount}&filter_period=${currentMatrixFilter}`);
-        const data = await response.json();
-        currentMatrixData = data; // Запоминаем для создания накладной
-
-        let html = `
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
-                <div class="bg-white shadow rounded-lg p-6 border-t-4 border-blue-500">
-                    <h3 class="text-sm font-medium text-gray-500">Период закупки</h3>
-                    <p class="text-lg font-bold text-gray-800 mt-1">${data.week_start} — ${data.week_end}</p>
-                </div>
-                <div class="bg-white shadow rounded-lg p-6 border-t-4 border-green-500">
-                    <h3 class="text-sm font-medium text-gray-500">Инвентаризация (база)</h3>
-                    <p class="text-lg font-bold text-gray-800 mt-1">${data.inv_date ? data.inv_date : 'Нет актов'}</p>
-                </div>
-                <div class="bg-white shadow rounded-lg p-6 border-t-4 border-purple-500">
-                    <h3 class="text-sm font-medium text-gray-500">Учтено рабочих дней</h3>
-                    <p class="text-lg font-bold text-purple-600 mt-1">${data.working_days_count} дней</p>
-                </div>
-            </div>
-
-            <div class="bg-white shadow rounded-lg overflow-hidden">
-                <div class="bg-gray-50 px-6 py-4 border-b border-gray-200 flex flex-wrap justify-between items-center gap-3">
-                    <h3 class="text-lg font-medium text-gray-900">📊 Чистая потребность к закупке <span class="text-xs text-blue-600 font-bold">(Фильтр: ${currentMatrixFilter})</span></h3>
-                    
-                    <!-- Кнопка и выбор МТТ -->
-                    <div class="flex items-center gap-2">
-                        <select id="createDraftMttSelect" class="border border-gray-300 rounded-md px-3 py-1.5 text-xs font-bold focus:ring-2 focus:ring-amber-500 bg-white">
-                        </select>
-                        <button onclick="createDraftSaleDocument()" class="bg-amber-600 text-white px-3.5 py-1.5 rounded-md text-xs font-bold hover:bg-amber-700 transition flex items-center gap-1 shadow">
-                            📄 Создать накладную
-                        </button>
-                    </div>
-                </div>
-                <div class="overflow-x-auto" style="max-height: 700px;">
-                    <table class="min-w-full divide-y divide-gray-200 text-xs border-collapse">
-                        <thead class="bg-gray-100 sticky top-0 z-10">
-                            <tr>
-                                <th class="px-4 py-3 text-left font-bold text-gray-700 border-r bg-gray-100 sticky left-0 z-20 min-w-[180px]">Продукт</th>
-                                <th class="px-3 py-3 text-center font-bold text-gray-700 border-r bg-gray-100 min-w-[70px]">Ед.</th>
-        `;
-        
-        data.points.forEach(point => {
-            html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]">${point.name}<br><span class="text-[10px] text-blue-600">(по факту)</span></th>`;
-        });
-        
-        html += `<th class="px-4 py-3 text-center font-bold text-blue-800 bg-blue-50">ИТОГО К ЗАКУПКЕ</th></tr></thead><tbody class="divide-y divide-gray-200 bg-white">`;
-
-        for (const [prodName, rowData] of Object.entries(data.matrix)) {
-            html += `
-                <tr class="hover:bg-gray-50">
-                    <td class="px-4 py-3 font-medium text-gray-900 border-r bg-white sticky left-0 z-10">${prodName}</td>
-                    <td class="px-3 py-3 text-center text-gray-500 border-r bg-gray-50">${rowData.unit}</td>
-            `;
-            data.points.forEach(point => {
-                const val = rowData.points_qty[point.id] || 0;
-                html += `<td class="px-3 py-3 text-center border-r text-gray-700 ${val > 0 ? 'font-semibold text-blue-600' : 'text-gray-300'}">${val > 0 ? val : '-'}</td>`;
-            });
-            html += `<td class="px-4 py-3 text-center font-bold text-blue-900 bg-green-50">${rowData.weekly_total}</td></tr>`;
-        }
-        html += `</tbody></table></div></div>`;
-        container.innerHTML = html;
-
-        // Заполняем выпадающий список МТТ для создания накладной
-        const mttSelect = document.getElementById('createDraftMttSelect');
-        if (mttSelect && data.points) {
-            mttSelect.innerHTML = data.points.map(p => `<option value="${p.id}" data-name="${p.name}">${p.name}</option>`).join('');
-        }
-    } catch (err) {
-        container.innerHTML = '<div class="text-center py-12 text-red-500">Ошибка загрузки матрицы.</div>';
-    }
-}
-
-// Функция отправки запроса на создание черновика накладной во второй проект
-async function createDraftSaleDocument() {
-    if (!currentMatrixData) {
-        alert('Сначала сформируйте разнарядку!');
-        return;
-    }
-
-    const selectEl = document.getElementById('createDraftMttSelect');
-    if (!selectEl || !selectEl.value) {
-        alert('Выберите МТТ для создания накладной');
-        return;
-    }
-
-    const pointId = parseInt(selectEl.value);
-    const selectedOption = selectEl.options[selectEl.selectedIndex];
-    const mttName = selectedOption.getAttribute('data-name') || selectedOption.text;
-    const targetDate = document.getElementById('targetDate').value;
-
-    // Собираем продукты и их точное количество из разнарядки по выбранному МТТ
-    const items = [];
-    for (const [prodName, rowData] of Object.entries(currentMatrixData.matrix)) {
-        const qty = rowData.points_qty[pointId] || 0;
-        if (qty > 0) {
-            items.push({
-                product: prodName,
-                qty: qty
-            });
-        }
-    }
-
-    if (items.length === 0) {
-        alert(`Для ${mttName} нет продуктов к закупке (все значения равны 0).`);
-        return;
-    }
-
-    if (!confirm(`Создать черновик накладной на дату ${targetDate} для ${mttName} (${items.length} позиций)?`)) {
-        return;
-    }
-
-    try {
-        const response = await fetch(`${SHIPPING_SERVICE_URL}/api/external/sales/create-draft`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                date: targetDate,
-                mtt_name: mttName,
-                organization: 'MUXSIN-FAYZ',
-                items: items
-            })
-        });
-
-        const resData = await response.json();
-
-        if (response.ok) {
-            alert(`✅ ${resData.message}`);
-        } else {
-            alert(`❌ Ошибка: ${resData.error || 'Не удалось создать накладную'}`);
-        }
-    } catch (err) {
-        alert(`❌ Ошибка соединения со второй системой отгрузок: ${err.message}`);
-    }
-}
