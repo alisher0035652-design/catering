@@ -1895,7 +1895,7 @@ def save_setting_api(data: dict):
   return {"status": "success"}
 
 
-# --- ОБНОВЛЕННЫЙ ЭНДПОИНТ МАТРИЦЫ РАЗНАРЯДКИ С ФИЛЬТРАЦИЕЙ ---
+# --- ОБНОВЛЕННЫЙ ЭНДПОИНТ МАТРИЦЫ РАЗНАРЯДКИ С ПРАВИЛЬНОЙ ЛОГИКОЙ РАСЧЕТА И ФИЛЬТРАЦИЕЙ ---
 @app.get("/api/raznaryadka/matrix/{target_date}")
 def get_matrix_raznaryadka(
     target_date: str,
@@ -1968,7 +1968,7 @@ def get_matrix_raznaryadka(
             purchases_between[pid].get(prod, 0.0) + p.get("qty", 0.0)
         )
 
-  # 4. Расход продуктов за прошлые дни
+  # 4. Расход продуктов за прошлые дни (от инвентаризации до начала периода)
   fact_storage = load_fact_children_settings()
   consumed_between = {}
   if inv_date_used:
@@ -1994,7 +1994,7 @@ def get_matrix_raznaryadka(
               ) + (pdata.get("qty_per_child", 0.0) * children)
         curr_d += timedelta(days=1)
 
-  # 5. Вычисление доступных остатков на складах МТТ
+  # 5. Вычисление актуальных доступных остатков на складах МТТ к началу периода
   effective_stock = {}
   for pid in points_dict.keys():
     effective_stock[pid] = {}
@@ -2011,17 +2011,23 @@ def get_matrix_raznaryadka(
       net_stock = (init_val + purch_val) - cons_val
       effective_stock[pid][prod] = net_stock
 
-  # 6. Расчет валовой потребности по дням на основе факта детей
+  # 6. ПРАВИЛЬНАЯ ЛОГИКА РАСЧЕТА ПО ДНЯМ С УЧЕТОМ ОСТАТКОВ
+  # Для каждого дня рассчитывается потребность, и остаток расходуется последовательно,
+  # либо чистая потребность накапливается корректно.
   matrix_data = {}
   working_days_count = 0
+
+  # Создаем рабочую копию остатков для симуляции списания по дням
+  running_stock = {}
+  for pid, prods in effective_stock.items():
+    running_stock[pid] = prods.copy()
 
   for day_obj, menu_num in target_days:
     working_days_count += 1
     d_str = day_obj.isoformat()
-
     day_fact = fact_storage.get(d_str, {}).get(region, {})
-
     ttk_items = load_menu_from_excel(menu_num)
+
     for point_id, point_info in points_dict.items():
       val_ch = day_fact.get(str(point_id), day_fact.get(point_id))
 
@@ -2046,37 +2052,52 @@ def get_matrix_raznaryadka(
       for prod_name, data in ttk_items.items():
         kg_per_child = data.get("qty_per_child", 0.0)
         unit = data["unit"]
-        needed = kg_per_child * children
+        gross_needed = kg_per_child * children
+
         if prod_name not in matrix_data:
           matrix_data[prod_name] = {
               "unit": unit,
               "points_qty": {pid: 0.0 for pid in points_dict.keys()},
               "weekly_total": 0.0,
           }
-        matrix_data[prod_name]["points_qty"][point_id] += needed
 
-  # 7. Вычитание текущих остатков и формирование итоговой потребности
+        # Вычитаем из остатка склада на точке
+        point_stocks = running_stock.get(point_id, {})
+        available = 0.0
+        st_key_matched = None
+        for st_prod, st_val in point_stocks.items():
+          if st_prod.strip().lower() == prod_name.strip().lower():
+            available = st_val
+            st_key_matched = st_prod
+            break
+
+        if available >= gross_needed:
+          # Остаток полностью покрывает потребность этого дня
+          net_needed = 0.0
+          if st_key_matched:
+            running_stock[point_id][st_key_matched] -= gross_needed
+        else:
+          # Остатка частично не хватает, остаток сгорает до 0, разницу нужно закупить
+          net_needed = gross_needed - available
+          if st_key_matched:
+            running_stock[point_id][st_key_matched] = 0.0
+
+        matrix_data[prod_name]["points_qty"][point_id] += round(net_keyword_val if 'net_keyword_val' in locals() else net_needed, 2)
+
+  # Корректировка структуры matrix_data и подсчет итогов
   for prod_name, prod_info in matrix_data.items():
     weekly_sum = 0.0
     for pid in points_dict.keys():
-      gross_qty = prod_info["points_qty"][pid]
-      stock_at_start = 0.0
-      p_stocks = effective_stock.get(pid, {})
-      for st_prod, st_qty in p_stocks.items():
-        if st_prod.strip().lower() == prod_name.strip().lower():
-          stock_at_start += st_qty
-
-      net_qty = max(0.0, gross_qty - stock_at_start)
-      prod_info["points_qty"][pid] = round(net_qty, 2)
-      weekly_sum += net_qty
+      val = round(prod_info["points_qty"][pid], 2)
+      prod_info["points_qty"][pid] = val
+      weekly_sum += val
     prod_info["weekly_total"] = round(weekly_sum, 2)
 
-  # 8. Фильтрация по периодичности из листа "Все номенклатуры"
+  # 7. Фильтрация по периодичности из листа "Все номенклатуры"
   if filter_period and filter_period != "ALL":
     periodicities = load_all_nomenclature_periodicities()
     filtered_matrix = {}
     for prod_name, prod_info in matrix_data.items():
-      # Ищем соответствие по точному совпадению или без учета регистра/пробелов
       prod_mapped_period = None
       for p_key, p_val in periodicities.items():
         if p_key.strip().lower() == prod_name.strip().lower():
@@ -2096,7 +2117,6 @@ def get_matrix_raznaryadka(
       "points": points_list,
       "matrix": matrix_data,
   }
-
 
 # --- ЭНДПОИНТ ЭКСПОРТА МАТРИЦЫ РАЗНАРЯДКИ В EXCEL С ФИЛЬТРОМ И СТИЛИЗАЦИЕЙ ---
 @app.get("/api/raznaryadka/export/excel")
