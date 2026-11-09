@@ -2,22 +2,22 @@ import asyncio
 from datetime import date, timedelta
 import io
 import json
+import math
 import os
 import re
 import subprocess
-import math
 
-import openpyxl
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
+import openpyxl
 import pandas as pd
 import psycopg2
 import psycopg2.extras
 from PyPDF2 import PdfReader, PdfWriter
+import requests
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.pdfgen import canvas
-import requests
 
 app = FastAPI(title="Catering Management API", version="1.0.0")
 
@@ -1536,11 +1536,11 @@ def get_fact_report(report_date: str, region: str = "Город"):
       kg_per_child = pdata.get("qty_per_child", 0.0)
       unit = pdata.get("unit", "кг")
 
-    points_qty = {}
-    row_sum = 0.0
-    for p in points_list:
-          pid = p["id"]
-          child_cnt = p["default_children"]
+      points_qty = {}
+      row_sum = 0.0
+      for p in points_list:
+        pid = p["id"]
+        child_cnt = p["default_children"]
 
         # Округляем в большую сторону, если это штучный товар (шт)
         if unit == "шт":
@@ -1669,11 +1669,9 @@ def get_balance_report(report_date: str, region: str = "Город"):
             if pid not in consumed_between:
               consumed_between[pid] = {}
             for prod_name, pdata in day_menu.items():
-              # Определяем, штучный ли это товар (например, тухум)
               unit_check = pdata.get("unit", "кг")
               raw_consumption = pdata.get("qty_per_child", 0.0) * child_cnt
               
-              # Если товар в штуках, округляем суточный расход вверх
               if unit_check == "шт":
                 day_qty = math.ceil(raw_consumption)
               else:
@@ -1726,9 +1724,8 @@ def get_balance_report(report_date: str, region: str = "Город"):
 
       bal = (init_val + purch_val) - cons_val
       
-      # ➔ Если единицы измерения "шт", округляем остаток до целого числа, иначе до 2 знаков
       if unit == "шт":
-        bal_rounded = float(math.ceil(bal)) # или целое число int(bal)
+        bal_rounded = float(math.ceil(bal))
       else:
         bal_rounded = round(bal, 2)
 
@@ -2192,7 +2189,6 @@ def get_matrix_raznaryadka(
         kg_per_child = data.get("qty_per_child", 0.0)
         unit = data["unit"]
         
-        # Если товар в штуках, округляем валовую потребность за день в большую сторону
         if unit == "шт":
           gross_needed = math.ceil(kg_per_child * children)
         else:
@@ -2223,7 +2219,6 @@ def get_matrix_raznaryadka(
           if st_key_matched:
             running_stock[point_id][st_key_matched] = 0.0
 
-        # Добавляем к матрице с учетом округления
         if unit == "шт":
           matrix_data[prod_name]["points_qty"][point_id] += float(math.ceil(net_needed))
         else:
@@ -2232,7 +2227,7 @@ def get_matrix_raznaryadka(
   # Подсчет итогов с округлением для штучных товаров
   for prod_name, prod_info in matrix_data.items():
     unit = prod_info["unit"]
-    weekly_sum = 0.0
+    row_sum = 0.0
     for pid in points_dict.keys():
       val = prod_info["points_qty"][pid]
       if unit == "шт":
@@ -2240,12 +2235,12 @@ def get_matrix_raznaryadka(
       else:
         val = round(val, 2)
       prod_info["points_qty"][pid] = val
-      weekly_sum += val
+      row_sum += val
       
     if unit == "шт":
-      prod_info["weekly_total"] = float(math.ceil(weekly_sum))
+      prod_info["weekly_total"] = float(math.ceil(row_sum))
     else:
-      prod_info["weekly_total"] = round(weekly_sum, 2)
+      prod_info["weekly_total"] = round(row_sum, 2)
 
   # 7. Фильтрация по номенклатуре ("Все номенклатуры")
   if filter_period and filter_period != "ALL":
@@ -2271,6 +2266,7 @@ def get_matrix_raznaryadka(
       "points": points_list,
       "matrix": matrix_data,
   }
+
 
 # --- ЭНДПОИНТ ЭКСПОРТА МАТРИЦЫ РАЗНАРЯДКИ В EXCEL С ГРАНИЦАМИ И РАЗМЕРАМИ ---
 @app.get("/api/raznaryadka/export/excel")
