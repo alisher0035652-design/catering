@@ -1669,9 +1669,19 @@ def get_balance_report(report_date: str, region: str = "Город"):
             if pid not in consumed_between:
               consumed_between[pid] = {}
             for prod_name, pdata in day_menu.items():
+              # Определяем, штучный ли это товар (например, тухум)
+              unit_check = pdata.get("unit", "кг")
+              raw_consumption = pdata.get("qty_per_child", 0.0) * child_cnt
+              
+              # Если товар в штуках, округляем суточный расход вверх
+              if unit_check == "шт":
+                day_qty = math.ceil(raw_consumption)
+              else:
+                day_qty = raw_consumption
+
               consumed_between[pid][prod_name] = consumed_between[pid].get(
                   prod_name, 0.0
-              ) + (pdata.get("qty_per_child", 0.0) * child_cnt)
+              ) + day_qty
         curr_d += timedelta(days=1)
 
   balance_report = {}
@@ -1715,14 +1725,20 @@ def get_balance_report(report_date: str, region: str = "Город"):
       )
 
       bal = (init_val + purch_val) - cons_val
-      bal_rounded = round(bal, 2)
+      
+      # ➔ Если единицы измерения "шт", округляем остаток до целого числа, иначе до 2 знаков
+      if unit == "шт":
+        bal_rounded = float(math.ceil(bal)) # или целое число int(bal)
+      else:
+        bal_rounded = round(bal, 2)
+
       points_balance[pid] = bal_rounded
       prod_total_balance += bal_rounded
 
     balance_report[prod_name] = {
         "unit": unit,
         "points_balance": points_balance,
-        "total_balance": round(prod_total_balance, 2),
+        "total_balance": float(math.ceil(prod_total_balance)) if unit == "шт" else round(prod_total_balance, 2),
     }
 
   return {
@@ -2086,7 +2102,7 @@ def get_matrix_raznaryadka(
             purchases_between[pid].get(prod, 0.0) + p.get("qty", 0.0)
         )
 
-  # 4. Расход продуктов за прошлые дни
+  # 4. Расход продуктов за прошлые дни (с учетом штучного учета для тухума)
   fact_storage = load_fact_children_settings()
   consumed_between = {}
   if inv_date_used:
@@ -2107,9 +2123,17 @@ def get_matrix_raznaryadka(
             if pid not in consumed_between:
               consumed_between[pid] = {}
             for prod_name, pdata in day_menu.items():
+              unit_check = pdata.get("unit", "кг")
+              raw_cons = pdata.get("qty_per_child", 0.0) * children
+              
+              if unit_check == "шт":
+                cons_val = math.ceil(raw_cons)
+              else:
+                cons_val = raw_cons
+
               consumed_between[pid][prod_name] = consumed_between[pid].get(
                   prod_name, 0.0
-              ) + (pdata.get("qty_per_child", 0.0) * children)
+              ) + cons_val
         curr_d += timedelta(days=1)
 
   # 5. Вычисление доступных остатков на складах МТТ
@@ -2167,7 +2191,12 @@ def get_matrix_raznaryadka(
       for prod_name, data in ttk_items.items():
         kg_per_child = data.get("qty_per_child", 0.0)
         unit = data["unit"]
-        gross_needed = kg_per_child * children
+        
+        # Если товар в штуках, округляем валовую потребность за день в большую сторону
+        if unit == "шт":
+          gross_needed = math.ceil(kg_per_child * children)
+        else:
+          gross_needed = kg_per_child * children
 
         if prod_name not in matrix_data:
           matrix_data[prod_name] = {
@@ -2194,16 +2223,29 @@ def get_matrix_raznaryadka(
           if st_key_matched:
             running_stock[point_id][st_key_matched] = 0.0
 
-        matrix_data[prod_name]["points_qty"][point_id] += round(net_needed, 2)
+        # Добавляем к матрице с учетом округления
+        if unit == "шт":
+          matrix_data[prod_name]["points_qty"][point_id] += float(math.ceil(net_needed))
+        else:
+          matrix_data[prod_name]["points_qty"][point_id] += round(net_needed, 2)
 
-  # Подсчет итогов
+  # Подсчет итогов с округлением для штучных товаров
   for prod_name, prod_info in matrix_data.items():
+    unit = prod_info["unit"]
     weekly_sum = 0.0
     for pid in points_dict.keys():
-      val = round(prod_info["points_qty"][pid], 2)
+      val = prod_info["points_qty"][pid]
+      if unit == "шт":
+        val = float(math.ceil(val))
+      else:
+        val = round(val, 2)
       prod_info["points_qty"][pid] = val
       weekly_sum += val
-    prod_info["weekly_total"] = round(weekly_sum, 2)
+      
+    if unit == "шт":
+      prod_info["weekly_total"] = float(math.ceil(weekly_sum))
+    else:
+      prod_info["weekly_total"] = round(weekly_sum, 2)
 
   # 7. Фильтрация по номенклатуре ("Все номенклатуры")
   if filter_period and filter_period != "ALL":
@@ -2229,7 +2271,6 @@ def get_matrix_raznaryadka(
       "points": points_list,
       "matrix": matrix_data,
   }
-
 
 # --- ЭНДПОИНТ ЭКСПОРТА МАТРИЦЫ РАЗНАРЯДКИ В EXCEL С ГРАНИЦАМИ И РАЗМЕРАМИ ---
 @app.get("/api/raznaryadka/export/excel")
