@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+import math
 
 import openpyxl
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -393,12 +394,7 @@ def load_menu_from_excel(menu_num: int) -> dict:
 
       # Если это яйца (тухум), переводим граммы в штуки (1 яйцо = 55 грамм)
       if "тухум" in prod_name.lower() or "яйц" in prod_name.lower():
-        # Если в Excel норма дана в граммах (например, 57 или 67 грамм на ребенка),
-        # переводим в штуки: делим на 55 грамм. Если значение меньше 10, возможно это уже штуки.
-        if val > 5:
-          qty_in_units = val / 55.0
-        else:
-          qty_in_units = val
+        qty_in_units = val / 55.0 if val > 5 else val
         display_unit = "шт"
         menu_items[prod_name] = {
             "qty_per_child": qty_in_units,
@@ -1540,21 +1536,26 @@ def get_fact_report(report_date: str, region: str = "Город"):
       kg_per_child = pdata.get("qty_per_child", 0.0)
       unit = pdata.get("unit", "кг")
 
-      points_qty = {}
+     points_qty = {}
       row_sum = 0.0
       for p in points_list:
         pid = p["id"]
         child_cnt = p["default_children"]
-        qty = round(child_cnt * kg_per_child, 2)
+
+        # Округляем в большую сторону, если это штучный товар (шт)
+        if unit == "шт":
+          qty = math.ceil(child_cnt * kg_per_child)
+        else:
+          qty = round(child_cnt * kg_per_child, 2)
+
         points_qty[pid] = qty
         row_sum += qty
 
       fact_consumption[prod_name] = {
           "unit": unit,
           "points_qty": points_qty,
-          "total_fact": round(row_sum, 2),
+          "total_fact": math.ceil(row_sum) if unit == "шт" else round(row_sum, 2),
       }
-
   return {
       "date": report_date,
       "region": region,
