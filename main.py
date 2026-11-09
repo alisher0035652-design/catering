@@ -708,7 +708,7 @@ def get_dashboard():
                     <div class="mt-3 md:mt-0 flex items-center gap-3">
                         <input type="month" id="childrenMonthPicker" class="border border-gray-300 rounded-md px-3 py-2 text-sm">
                         <button onclick="downloadChildrenMatrixExcel()" class="bg-purple-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-purple-700 transition">📥 Скачать детей</button>
-                        <button onclick="downloadMonthlyMttExcel()" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 transition">📥 Скачать расход за месяц</button>
+                        <button onclick="downloadMonthlyMttExcel()" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 transition">📥 Скачать расход</button>
                     </div>
                 </div>
 
