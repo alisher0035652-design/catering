@@ -1537,10 +1537,10 @@ def get_fact_report(report_date: str, region: str = "Город"):
       unit = pdata.get("unit", "кг")
 
     points_qty = {}
-      row_sum = 0.0
-      for p in points_list:
-        pid = p["id"]
-        child_cnt = p["default_children"]
+    row_sum = 0.0
+    for p in points_list:
+          pid = p["id"]
+          child_cnt = p["default_children"]
 
         # Округляем в большую сторону, если это штучный товар (шт)
         if unit == "шт":
