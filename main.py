@@ -694,7 +694,6 @@ def get_dashboard():
                         </div>
                         <div class="self-end flex flex-wrap gap-2">
                             <button onclick="saveFactChildren()" class="bg-green-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-green-700 transition">💾 Сохранить факт</button>
-                            <button onclick="downloadFactExcel()" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 transition">📥 Скачать факт (День)</button>
                             <button onclick="downloadFactAllRegionsExcel()" class="bg-emerald-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-emerald-700 transition">📥 Скачать факт</button>
                             <button onclick="sendMenuTelegramManual()" class="bg-indigo-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-indigo-700 transition">📤 Отправить меню в Telegram</button>
                         </div>
@@ -703,12 +702,13 @@ def get_dashboard():
 
                 <div class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center border-l-4 border-purple-500">
                     <div>
-                        <h3 class="font-bold text-gray-800 text-md">📊 Скачать посещаемость детей</h3>
-                        <p class="text-xs text-gray-500 mt-0.5">Выберите месяц для формирования сводной таблицы посещаемости</p>
+                        <h3 class="font-bold text-gray-800 text-md">📊 Выгрузка отчетов за месяц</h3>
+                        <p class="text-xs text-gray-500 mt-0.5">Выберите месяц для формирования посещаемости или детального расхода по МТТ</p>
                     </div>
                     <div class="mt-3 md:mt-0 flex items-center gap-3">
                         <input type="month" id="childrenMonthPicker" class="border border-gray-300 rounded-md px-3 py-2 text-sm">
                         <button onclick="downloadChildrenMatrixExcel()" class="bg-purple-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-purple-700 transition">📥 Скачать детей</button>
+                        <button onclick="downloadMonthlyMttExcel()" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 transition">📥 Скачать расход за месяц</button>
                     </div>
                 </div>
 
@@ -1133,12 +1133,6 @@ def get_dashboard():
                 }
             }
 
-            function downloadFactExcel() {
-                const dateVal = document.getElementById('factDate').value;
-                const region = document.getElementById('factRegionSelect').value;
-                window.location.href = `/api/fact/export/excel?report_date=${dateVal}&region=${region}`;
-            }
-
             function downloadFactAllRegionsExcel() {
                 const dateVal = document.getElementById('factDate').value;
                 window.location.href = `/api/fact/export/all-regions-excel?report_date=${dateVal}`;
@@ -1152,6 +1146,16 @@ def get_dashboard():
                     return;
                 }
                 window.location.href = `/api/fact/export/children-matrix?month=${monthVal}&region=${region}`;
+            }
+
+            function downloadMonthlyMttExcel() {
+                const monthVal = document.getElementById('childrenMonthPicker').value;
+                const region = document.getElementById('factRegionSelect').value;
+                if (!monthVal) {
+                    alert('Пожалуйста, выберите месяц');
+                    return;
+                }
+                window.location.href = `/api/fact/export/monthly-mtt-excel?month=${monthVal}&region=${region}`;
             }
 
             async function loadBalanceData() {
@@ -1759,47 +1763,6 @@ def delete_fact_children_api(report_date: str, region: str = "Город"):
   return {"status": "success"}
 
 
-@app.get("/api/fact/export/excel")
-def export_fact_excel(report_date: str, region: str = "Город"):
-  try:
-    parsed_date = date.fromisoformat(report_date)
-  except Exception:
-    parsed_date = date.today()
-
-  report_data = get_fact_report(report_date, region)
-  points_dict = load_points_from_excel(region)
-
-  rows_data = []
-  fact_cons = report_data.get("fact_consumption", {})
-  for prod_name, pdata in fact_cons.items():
-    row = {"Продукт": prod_name, "Ед. изм.": pdata["unit"]}
-    for pid, pinfo in points_dict.items():
-      row[pinfo["name"]] = pdata["points_qty"].get(pid, 0.0)
-    row["ИТОГО ФАКТ"] = pdata["total_fact"]
-    rows_data.append(row)
-
-  df = pd.DataFrame(rows_data)
-  if df.empty:
-    df = pd.DataFrame(columns=["Продукт", "Ед. изм.", "ИТОГО ФАКТ"])
-
-  output = io.BytesIO()
-  with pd.ExcelWriter(output, engine="openpyxl") as writer:
-    df.to_excel(writer, index=False, sheet_name=f"Факт_{report_date}")
-  output.seek(0)
-
-  return StreamingResponse(
-      output,
-      media_type=(
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-      ),
-      headers={
-          "Content-Disposition": (
-              f"attachment; filename=Fact_Consumption_{region}_{report_date}.xlsx"
-          )
-      },
-  )
-
-
 @app.get("/api/fact/export/all-regions-excel")
 def export_fact_all_regions_excel(report_date: str):
   try:
@@ -1918,6 +1881,92 @@ def export_children_matrix_excel(month: str, region: str = "Город"):
     raise HTTPException(
         status_code=500, detail=f"Ошибка генерации файла: {str(e)}"
     )
+
+
+@app.get("/api/fact/export/monthly-mtt-excel")
+def export_monthly_mtt_consumption_excel(month: str, region: str = "Город"):
+  try:
+    parts = month.split("-")
+    year = int(parts[0])
+    m = int(parts[1])
+  except Exception:
+    raise HTTPException(
+        status_code=400,
+        detail="Неверный формат месяца. Используйте YYYY-MM",
+    )
+
+  start_date = date(year, m, 1)
+  if m == 12:
+    end_date = date(year + 1, 1, 1) - timedelta(days=1)
+  else:
+    end_date = date(year, m + 1, 1) - timedelta(days=1)
+
+  try:
+    points_dict = load_points_from_excel(region)
+    fact_storage = load_fact_children_settings()
+
+    rows_data = []
+    current = start_date
+    while current <= end_date:
+      d_str = current.isoformat()
+      menu_num = get_menu_number_for_date_custom(current)
+      
+      if menu_num is not None:
+        menu_items = load_menu_from_excel(menu_num)
+        saved_day_fact = fact_storage.get(d_str, {}).get(region, {})
+
+        for pid, pinfo in points_dict.items():
+          p_name = pinfo["name"]
+          val = saved_day_fact.get(str(pid))
+          if val is None:
+            val = saved_day_fact.get(pid, pinfo["children_count"])
+
+          try:
+            child_cnt = int(float(val)) if val != "" and val is not None else int(pinfo["children_count"])
+          except Exception:
+            child_cnt = 0
+
+          for prod_name, pdata in menu_items.items():
+            kg_per_child = pdata.get("qty_per_child", 0.0)
+            unit = pdata.get("unit", "кг")
+            raw_val = kg_per_child * child_cnt
+
+            if unit == "шт":
+              qty = float(math.ceil(raw_val))
+            else:
+              qty = round(raw_val, 2)
+
+            if qty > 0:
+              rows_data.append({
+                  "Дата": d_str,
+                  "МТТ": p_name,
+                  "Номенклатура": prod_name,
+                  "ед. изм.": unit,
+                  "кол-во": qty
+              })
+
+      current += timedelta(days=1)
+
+    df = pd.DataFrame(rows_data)
+    if df.empty:
+      df = pd.DataFrame(columns=["Дата", "МТТ", "Номенклатура", "ед. изм.", "кол-во"])
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+      df.to_excel(writer, index=False, sheet_name=f"Месячный_расход_{month}")
+    output.seek(0)
+
+    region_safe = "Gorod" if region == "Город" else "Rayon"
+    filename = f"Monthly_Consumption_MTT_{region_safe}_{month}.xlsx"
+
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+  except Exception as e:
+    print(f"❌ Ошибка в export_monthly_mtt_consumption_excel: {e}")
+    raise HTTPException(status_code=500, detail=f"Ошибка генерации файла: {str(e)}")
 
 
 @app.post("/api/menu/generate-and-send")
