@@ -1536,7 +1536,7 @@ def get_fact_report(report_date: str, region: str = "Город"):
       kg_per_child = pdata.get("qty_per_child", 0.0)
       unit = pdata.get("unit", "кг")
 
-     points_qty = {}
+    points_qty = {}
       row_sum = 0.0
       for p in points_list:
         pid = p["id"]
