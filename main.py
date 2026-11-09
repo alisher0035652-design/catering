@@ -390,13 +390,35 @@ def load_menu_from_excel(menu_num: int) -> dict:
           if len(row) > 2 and pd.notna(row.iloc[2])
           else "граммов"
       )
-      if "грам" in unit or "гр" in unit:
+
+      # Если это яйца (тухум), переводим граммы в штуки (1 яйцо = 55 грамм)
+      if "тухум" in prod_name.lower() or "яйц" in prod_name.lower():
+        # Если в Excel норма дана в граммах (например, 57 или 67 грамм на ребенка),
+        # переводим в штуки: делим на 55 грамм. Если значение меньше 10, возможно это уже штуки.
+        if val > 5:
+          qty_in_units = val / 55.0
+        else:
+          qty_in_units = val
+        display_unit = "шт"
+        menu_items[prod_name] = {
+            "qty_per_child": qty_in_units,
+            "unit": display_unit,
+        }
+      elif "грам" in unit or "гр" in unit:
         qty_in_kg = val / 1000.0
         display_unit = "кг"
+        menu_items[prod_name] = {
+            "qty_per_child": qty_in_kg,
+            "unit": display_unit,
+        }
       else:
         qty_in_kg = val
         display_unit = unit if unit else "шт"
-      menu_items[prod_name] = {"qty_per_child": qty_in_kg, "unit": display_unit}
+        menu_items[prod_name] = {
+            "qty_per_child": qty_in_kg,
+            "unit": display_unit,
+        }
+
     _MENU_CACHE[menu_num] = menu_items
     return menu_items
   except Exception as e:
