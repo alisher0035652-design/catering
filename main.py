@@ -392,9 +392,9 @@ def load_menu_from_excel(menu_num: int) -> dict:
           else "граммов"
       )
 
-      # Если это яйца (тухум), переводим граммы в штуки (1 яйцо = 55 грамм)
+    # Если это яйца (тухум), переводим граммы в штуки (1 яйцо = 55 грамм)
       if "тухум" in prod_name.lower() or "яйц" in prod_name.lower():
-        qty_in_units = val / 55.0 if val > 5 else val
+        qty_in_units = val / 55.0
         display_unit = "шт"
         menu_items[prod_name] = {
             "qty_per_child": qty_in_units,
