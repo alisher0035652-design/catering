@@ -981,8 +981,9 @@ def get_dashboard():
                             <label class="text-xs font-medium text-gray-600 block">На дату:</label>
                             <input type="date" id="balanceDate" onchange="loadBalanceData()" class="border border-gray-300 rounded-md px-3 py-2 text-sm">
                         </div>
-                        <div class="self-end">
+                        <div class="self-end flex gap-2">
                             <button onclick="loadBalanceData()" class="bg-indigo-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-indigo-700 transition">Обновить остатки</button>
+                            <button onclick="downloadBalanceExcel()" class="bg-emerald-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-emerald-700 transition">📥 Скачать Excel</button>
                         </div>
                     </div>
                 </header>
@@ -1905,6 +1906,16 @@ def get_dashboard():
             }
 
             window.onload = loadMatrixRaznaryadka;
+
+            function downloadBalanceExcel() {
+                const dateVal = document.getElementById('balanceDate').value;
+                const region = document.getElementById('balanceRegionSelect').value;
+                if (!dateVal) {
+                    alert('Выберите дату');
+                    return;
+                }
+                window.location.href = `/api/balance/export/excel?report_date=${dateVal}&region=${region}`;
+            }
         </script>
     </body>
     </html>
@@ -2251,6 +2262,98 @@ def get_balance_report(report_date: str, region: str = "Город"):
       "balance_report": balance_report,
   }
 
+@app.get("/api/balance/export/excel")
+def export_balance_excel(report_date: str, region: str = "Город"):
+  try:
+    data = get_balance_report(report_date, region)
+  except Exception as e:
+    raise HTTPException(
+        status_code=400, detail=f"Ошибка расчета остатков: {str(e)}"
+    )
+
+  points = data.get("points", [])
+  balance_report = data.get("balance_report", {})
+
+  rows_data = []
+  for prod_name, prod_info in balance_report.items():
+    row = {"Продукт": prod_name, "Ед. изм.": prod_info["unit"]}
+    for p in points:
+      row[p["name"]] = prod_info["points_balance"].get(p["id"], 0.0)
+    row["ИТОГО ОСТАТОК"] = prod_info["total_balance"]
+    rows_data.append(row)
+
+  df = pd.DataFrame(rows_data)
+  if df.empty:
+    columns = (
+        ["Продукт", "Ед. изм."]
+        + [p["name"] for p in points]
+        + ["ИТОГО ОСТАТОК"]
+    )
+    df = pd.DataFrame(columns=columns)
+
+  output = io.BytesIO()
+  with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    df.to_excel(writer, index=False, sheet_name="Остатки")
+
+    worksheet = writer.sheets["Остатки"]
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    thin_border = Border(
+        left=Side(style="thin", color="CCCCCC"),
+        right=Side(style="thin", color="CCCCCC"),
+        top=Side(style="thin", color="CCCCCC"),
+        bottom=Side(style="thin", color="CCCCCC"),
+    )
+    header_fill = PatternFill(
+        start_color="E0E0E0", end_color="E0E0E0", fill_type="solid"
+    )
+    header_font = Font(bold=True)
+
+    for row_idx, row in enumerate(
+        worksheet.iter_rows(
+            min_row=1,
+            max_row=len(df) + 1,
+            min_col=1,
+            max_col=len(df.columns),
+        ),
+        start=1,
+    ):
+      for cell in row:
+        cell.border = thin_border
+        if row_idx == 1:
+          cell.fill = header_fill
+          cell.font = header_font
+          cell.alignment = Alignment(
+              horizontal="center", vertical="center", wrap_text=True
+          )
+        else:
+          if cell.column == 1:
+            cell.alignment = Alignment(horizontal="left", vertical="center")
+          else:
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    worksheet.row_dimensions[1].height = 25
+    worksheet.column_dimensions["A"].width = 21.4
+
+    num_columns = len(df.columns)
+    for col_idx in range(2, num_columns):
+      col_letter = openpyxl.utils.get_column_letter(col_idx)
+      worksheet.column_dimensions[col_letter].width = 10
+
+    last_col_letter = openpyxl.utils.get_column_letter(num_columns)
+    worksheet.column_dimensions[last_col_letter].width = 17.14
+
+  output.seek(0)
+  region_safe = "Gorod" if region == "Город" else "Rayon"
+  filename = f"Balance_Report_{region_safe}_{report_date}.xlsx"
+
+  return StreamingResponse(
+      output,
+      media_type=(
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      ),
+      headers={"Content-Disposition": f"attachment; filename={filename}"},
+  )
 
 @app.post("/api/fact/children")
 def save_fact_children_api(data: dict, report_date: str, region: str = "Город"):
