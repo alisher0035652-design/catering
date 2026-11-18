@@ -22,6 +22,7 @@ from reportlab.pdfgen import canvas
 app = FastAPI(title="Catering Management API", version="1.0.0")
 
 _MENU_CACHE = {}
+_STAFF_MENU_CACHE = {}
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -64,6 +65,14 @@ def init_db():
     """)
   cursor.execute("""
         CREATE TABLE IF NOT EXISTS fact_children (
+            date_str VARCHAR(20),
+            region VARCHAR(50),
+            data JSONB,
+            PRIMARY KEY (date_str, region)
+        );
+    """)
+  cursor.execute("""
+        CREATE TABLE IF NOT EXISTS fact_staff (
             date_str VARCHAR(20),
             region VARCHAR(50),
             data JSONB,
@@ -237,6 +246,61 @@ def delete_fact_children_for_date(date_str: str, region: str):
     print(f"Ошибка удаления факта детей из БД: {e}")
 
 
+def load_fact_staff_settings() -> dict:
+  staff_map = {}
+  try:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT date_str, region, data FROM fact_staff;")
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    for r in rows:
+      d = r["date_str"]
+      reg = r["region"]
+      val = r["data"] if isinstance(r["data"], dict) else json.loads(r["data"])
+      if d not in staff_map:
+        staff_map[d] = {}
+      staff_map[d][reg] = val
+  except Exception as e:
+    print(f"Ошибка загрузки факта сотрудников из БД: {e}")
+  return staff_map
+
+
+def save_fact_staff_for_date(date_str: str, region: str, data: dict):
+  try:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    json_val = json.dumps(data, ensure_ascii=False)
+    cursor.execute(
+        """
+            INSERT INTO fact_staff (date_str, region, data) VALUES (%s, %s, %s)
+            ON CONFLICT (date_str, region) DO UPDATE SET data = EXCLUDED.data;
+        """,
+        (date_str, region, json_val),
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+  except Exception as e:
+    print(f"Ошибка сохранения факта сотрудников в БД: {e}")
+
+
+def delete_fact_staff_for_date(date_str: str, region: str):
+  try:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "DELETE FROM fact_staff WHERE date_str = %s AND region = %s;",
+        (date_str, region),
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+  except Exception as e:
+    print(f"Ошибка удаления факта сотрудников из БД: {e}")
+
+
 def load_purchases_settings() -> dict:
   purchases_by_region = {"Город": {}, "Район": {}}
   try:
@@ -392,7 +456,6 @@ def load_menu_from_excel(menu_num: int) -> dict:
           else "граммов"
       )
 
-    # Если это яйца (тухум), переводим граммы в штуки (1 яйцо = 55 грамм)
       if "тухум" in prod_name.lower() or "яйц" in prod_name.lower():
         qty_in_units = val / 55.0
         display_unit = "шт"
@@ -422,6 +485,52 @@ def load_menu_from_excel(menu_num: int) -> dict:
     return {}
 
 
+def load_staff_menu_from_excel(menu_num: int) -> dict:
+  if menu_num in _STAFF_MENU_CACHE:
+    return _STAFF_MENU_CACHE[menu_num]
+
+  sheet_name = f"{menu_num}-Меню"
+  try:
+    df = pd.read_excel("Menu_staff.xlsx", sheet_name=sheet_name)
+    menu_items = {}
+    for _, row in df.iterrows():
+      prod_name = str(row.iloc[0]).strip()
+      val = float(row.iloc[1]) if pd.notna(row.iloc[1]) else 0.0
+      unit = (
+          str(row.iloc[2]).strip().lower()
+          if len(row) > 2 and pd.notna(row.iloc[2])
+          else "граммов"
+      )
+
+      if "тухум" in prod_name.lower() or "яйц" in prod_name.lower():
+        qty_in_units = val / 55.0
+        display_unit = "шт"
+        menu_items[prod_name] = {
+            "qty_per_staff": qty_in_units,
+            "unit": display_unit,
+        }
+      elif "грам" in unit or "гр" in unit:
+        qty_in_kg = val / 1000.0
+        display_unit = "кг"
+        menu_items[prod_name] = {
+            "qty_per_staff": qty_in_kg,
+            "unit": display_unit,
+        }
+      else:
+        qty_in_kg = val
+        display_unit = unit if unit else "шт"
+        menu_items[prod_name] = {
+            "qty_per_staff": qty_in_kg,
+            "unit": display_unit,
+        }
+
+    _STAFF_MENU_CACHE[menu_num] = menu_items
+    return menu_items
+  except Exception as e:
+    print(f"Ошибка чтения листа сотрудников {sheet_name}: {e}")
+    return {}
+
+
 def load_all_nomenclature_periodicities() -> dict:
   mapping = {}
   try:
@@ -439,10 +548,10 @@ def load_all_nomenclature_periodicities() -> dict:
 def get_all_products_with_units() -> dict:
   products = {}
   for i in range(1, 11):
-    items = load_menu_from_excel(i)
-    for p, info in items.items():
-      if p not in products:
-        products[p] = info["unit"]
+    for items in (load_menu_from_excel(i), load_staff_menu_from_excel(i)):
+      for p, info in items.items():
+        if p not in products:
+          products[p] = info["unit"]
   return dict(sorted(products.items()))
 
 
@@ -531,6 +640,83 @@ def generate_menu_pdf_for_point(
     return temp_excel_path
 
 
+def generate_staff_menu_pdf_for_point(
+    report_date_str: str,
+    region: str,
+    point_id: int,
+    point_name: str,
+    staff_count: int,
+    menu_num: int,
+) -> str:
+  template_path = "Menu shablon_staff.xlsx"
+  if not os.path.exists(template_path):
+    raise FileNotFoundError("Шаблон Menu shablon_staff.xlsx не найден")
+
+  try:
+    d_obj = date.fromisoformat(report_date_str)
+    formatted_date = d_obj.strftime("%d.%m.%Y")
+  except Exception:
+    formatted_date = report_date_str
+
+  wb = openpyxl.load_workbook(template_path)
+  target_sheet_name = str(menu_num)
+
+  if target_sheet_name not in wb.sheetnames:
+    raise ValueError(f"Лист меню {target_sheet_name} не найден в шаблоне сотрудников")
+
+  for sheetname in wb.sheetnames:
+    if sheetname != target_sheet_name:
+      del wb[sheetname]
+
+  ws = wb[target_sheet_name]
+  ws["A1"] = formatted_date
+  ws["A4"] = staff_count
+  ws["F1"] = point_name
+
+  ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
+  ws.page_setup.paperSize = ws.PAPERSIZE_A4
+  ws.page_setup.fitToWidth = 1
+  ws.page_setup.fitToHeight = 1
+  ws.sheet_properties.pageSetUpPr.fitToPage = True
+  ws.page_setup.horizontalCentered = True
+  ws.page_setup.verticalCentered = True
+  ws.page_margins.left = 0.4
+  ws.page_margins.right = 0.4
+  ws.page_margins.top = 1.5
+  ws.page_margins.bottom = 0.3
+  ws.page_margins.header = 0.0
+  ws.page_margins.footer = 0.0
+
+  temp_excel_path = f"temp_staff_{region}_{point_id}_{report_date_str}.xlsx"
+  final_pdf_path = f"Menu_Staff_{point_name}_{report_date_str}.pdf"
+
+  wb.save(temp_excel_path)
+  wb.close()
+
+  subprocess.run(
+      [
+          "libreoffice",
+          "--headless",
+          "--convert-to",
+          "pdf",
+          temp_excel_path,
+          "--outdir",
+          ".",
+      ],
+      check=True,
+  )
+
+  generated_pdf = temp_excel_path.replace(".xlsx", ".pdf")
+  if os.path.exists(generated_pdf):
+    if os.path.exists(final_pdf_path):
+      os.remove(final_pdf_path)
+    os.rename(generated_pdf, final_pdf_path)
+    if os.path.exists(temp_excel_path):
+      os.remove(temp_excel_path)
+    return final_pdf_path
+  return temp_excel_path
+
+
 def send_pdf_to_telegram(pdf_path: str, caption: str):
   target_chat_id = TELEGRAM_ADMIN_CHAT_ID or TELEGRAM_CHAT_ID
 
@@ -599,6 +785,37 @@ async def process_and_send_menu_in_background(
   print("✅ Все меню успешно сгенерированы и отправлены в фоновом режиме!")
 
 
+async def process_and_send_staff_menu_in_background(
+    report_date: str, region: str, saved_fact: dict, menu_num: int
+):
+  points_dict = load_points_from_excel(region)
+  for pid, pinfo in points_dict.items():
+    staff_cnt = saved_fact.get(str(pid), saved_fact.get(pid))
+    if staff_cnt is None or int(staff_cnt) <= 0:
+      continue
+
+    p_name = pinfo["name"]
+    try:
+      pdf_file = generate_staff_menu_pdf_for_point(
+          report_date_str=report_date,
+          region=region,
+          point_id=pid,
+          point_name=p_name,
+          staff_count=int(staff_cnt),
+          menu_num=menu_num,
+      )
+      caption = (
+          f"📋 Меню сотрудников № {menu_num} для {p_name} ({region})\n📅 Дата:"
+          f" {report_date}\n👥 Сотрудников: {staff_cnt}"
+      )
+      send_pdf_to_telegram(pdf_file, caption)
+      if pdf_file and os.path.exists(pdf_file):
+        os.remove(pdf_file)
+      await asyncio.sleep(2)
+    except Exception as e:
+      print(f"❌ Ошибка при обработке точки сотрудников {p_name}: {e}")
+
+
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 def get_dashboard():
   html_content = """
@@ -619,7 +836,8 @@ def get_dashboard():
                 </div>
                 <div class="flex flex-wrap gap-2">
                     <button onclick="switchTab('matrix')" id="btnTabMatrix" class="px-3 py-2 rounded-md text-sm font-medium bg-blue-600 text-white transition">📊 Матрица разнарядки</button>
-                    <button onclick="switchTab('fact')" id="btnTabFact" class="px-3 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">📋 Ежедневный факт</button>
+                    <button onclick="switchTab('fact')" id="btnTabFact" class="px-3 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">📋 Ежедневный факт (Дети)</button>
+                    <button onclick="switchTab('staffFact')" id="btnTabStaffFact" class="px-3 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">👥 Факт (Сотрудники)</button>
                     <button onclick="switchTab('balance')" id="btnTabBalance" class="px-3 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">📦 Остатки по МТТ</button>
                     <button onclick="switchTab('calendar')" id="btnTabCalendar" class="px-3 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">📅 Календарь меню</button>
                     <button onclick="switchTab('stock')" id="btnTabStock" class="px-3 py-2 rounded-md text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition">⚙️ Инвентаризация</button>
@@ -630,13 +848,11 @@ def get_dashboard():
                 <header class="bg-white shadow rounded-lg p-6 flex flex-col justify-between">
                     <div>
                         <h1 class="text-xl font-bold text-gray-800">Матричная разнарядка (Чистая потребность)</h1>
-                        <p class="text-sm text-gray-500 mt-1">Автоматический учет остатков, факта детей за последние дни и приходов от MUXSIN-FAYZ</p>
+                        <p class="text-sm text-gray-500 mt-1">Автоматический учет остатков, факта детей и сотрудников за последние дни и приходов от MUXSIN-FAYZ</p>
                     </div>
                 </header>
 
-                <!-- ЕДИНАЯ ПАНЕЛЬ: Фильтры номенклатуры + Параметры + Кнопки управления -->
                 <div class="bg-white shadow rounded-lg p-4 flex flex-wrap items-center justify-between gap-4">
-                    <!-- Кнопки фильтрации номенклатуры -->
                     <div class="flex flex-wrap items-center gap-2">
                         <span class="text-xs font-bold text-gray-500 mr-1">Номенклатура:</span>
                         <button onclick="setMatrixFilter('ALL')" id="filterBtnALL" class="px-3 py-2 rounded-md text-xs font-bold bg-blue-600 text-white transition">Все позиции</button>
@@ -645,7 +861,6 @@ def get_dashboard():
                         <button onclick="setMatrixFilter('Месяц')" id="filterBtnМесяц" class="px-3 py-2 rounded-md text-xs font-bold bg-gray-200 text-gray-700 hover:bg-gray-300 transition">Месяц</button>
                     </div>
 
-                    <!-- Параметры и кнопки действий -->
                     <div class="flex flex-wrap items-center gap-3">
                         <div>
                             <label class="text-xs font-medium text-gray-600 block">Регион:</label>
@@ -677,7 +892,7 @@ def get_dashboard():
             <div id="tabFact" class="hidden space-y-6">
                 <header class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center">
                     <div>
-                        <h1 class="text-xl font-bold text-gray-800">📋 Фактический отчет расхода продуктов</h1>
+                        <h1 class="text-xl font-bold text-gray-800">📋 Фактический отчет расхода продуктов (Дети)</h1>
                         <p class="text-sm text-gray-500 mt-1">Утренний ввод детей по факту с автоматическим списанием по календарю меню</p>
                     </div>
                     <div class="mt-4 md:mt-0 flex flex-wrap items-center gap-3">
@@ -717,11 +932,42 @@ def get_dashboard():
                 </div>
             </div>
 
+            <div id="tabStaffFact" class="hidden space-y-6">
+                <header class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center">
+                    <div>
+                        <h1 class="text-xl font-bold text-gray-800">👥 Фактический расход продуктов (Сотрудники МТТ)</h1>
+                        <p class="text-sm text-gray-500 mt-1">Ввод сотрудников по факту с автоматическим списанием остатков и отправкой меню</p>
+                    </div>
+                    <div class="mt-4 md:mt-0 flex flex-wrap items-center gap-3">
+                        <div>
+                            <label class="text-xs font-medium text-gray-600 block">Регион:</label>
+                            <select id="staffFactRegionSelect" onchange="loadStaffFactData()" class="border border-gray-300 rounded-md px-3 py-2 text-sm">
+                                <option value="Город" selected>Город</option>
+                                <option value="Район">Район</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="text-xs font-medium text-gray-600 block">Дата отчета:</label>
+                            <input type="date" id="staffFactDate" onchange="loadStaffFactData()" class="border border-gray-300 rounded-md px-3 py-2 text-sm">
+                        </div>
+                        <div class="self-end flex flex-wrap gap-2">
+                            <button onclick="saveStaffFact()" class="bg-green-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-green-700 transition">💾 Сохранить факт</button>
+                            <button onclick="downloadStaffFactAllRegionsExcel()" class="bg-emerald-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-emerald-700 transition">📥 Скачать факт</button>
+                            <button onclick="sendStaffMenuTelegramManual()" class="bg-indigo-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-indigo-700 transition">📤 Отправить меню в Telegram</button>
+                        </div>
+                    </div>
+                </header>
+
+                <div id="staffFactContainer" class="space-y-6">
+                    <p class="p-8 text-center text-gray-400 bg-white shadow rounded-lg">Загрузка данных...</p>
+                </div>
+            </div>
+
             <div id="tabBalance" class="hidden space-y-6">
                 <header class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center">
                     <div>
                         <h1 class="text-xl font-bold text-gray-800">📦 Актуальные остатки продуктов по МТТ</h1>
-                        <p class="text-sm text-gray-500 mt-1">Формула: Остаток = Начальный остаток + Приход (MUXSIN-FAYZ) - Расход фактический</p>
+                        <p class="text-sm text-gray-500 mt-1">Формула: Остаток = Начальный остаток + Приход (MUXSIN-FAYZ) - Расход фактический (дети и сотрудники)</p>
                     </div>
                     <div class="mt-4 md:mt-0 flex flex-wrap items-center gap-3">
                         <div>
@@ -840,13 +1086,13 @@ def get_dashboard():
         </div>
 
         <script>
-            // Ссылка на второй проект отгрузок
             const SHIPPING_SERVICE_URL = "https://muxsin-fayz.onrender.com";
             let currentMatrixData = null;
 
             document.getElementById('targetDate').valueAsDate = new Date();
             document.getElementById('stockDate').valueAsDate = new Date();
             document.getElementById('factDate').valueAsDate = new Date();
+            document.getElementById('staffFactDate').valueAsDate = new Date();
             document.getElementById('balanceDate').valueAsDate = new Date();
             
             const now = new Date();
@@ -860,7 +1106,7 @@ def get_dashboard():
             let currentMatrixFilter = 'ALL';
 
             function switchTab(tab) {
-                ['matrix', 'fact', 'balance', 'calendar', 'stock'].forEach(t => {
+                ['matrix', 'fact', 'staffFact', 'balance', 'calendar', 'stock'].forEach(t => {
                     const el = document.getElementById('tab' + capitalize(t));
                     const btn = document.getElementById('btnTab' + capitalize(t));
                     if (el) el.classList.add('hidden');
@@ -874,10 +1120,14 @@ def get_dashboard():
                 if (tab === 'calendar') loadCalendarGrid();
                 if (tab === 'stock') loadStockMatrix();
                 if (tab === 'fact') loadFactData();
+                if (tab === 'staffFact') loadStaffFactData();
                 if (tab === 'balance') loadBalanceData();
             }
 
-            function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+            function capitalize(s) { 
+                if (s === 'staffFact') return 'StaffFact';
+                return s.charAt(0).toUpperCase() + s.slice(1); 
+            }
 
             function setMatrixFilter(filterVal) {
                 currentMatrixFilter = filterVal;
@@ -1117,6 +1367,165 @@ def get_dashboard():
                 } else {
                     alert('Ошибка при удалении.');
                 }
+            }
+
+            async function loadStaffFactData() {
+                const dateVal = document.getElementById('staffFactDate').value;
+                const region = document.getElementById('staffFactRegionSelect').value;
+                const container = document.getElementById('staffFactContainer');
+                container.innerHTML = '<div class="text-center py-12 text-gray-500 bg-white rounded-lg shadow">Загрузка данных сотрудников...</div>';
+
+                try {
+                    const res = await fetch(`/api/fact-staff/report?report_date=${dateVal}&region=${region}`);
+                    const data = await res.json();
+
+                    let html = `
+                        <div class="bg-white shadow rounded-lg p-6 border-l-4 border-blue-500 mb-6">
+                            <div class="flex justify-between items-center mb-4">
+                                <h3 class="font-bold text-gray-800 text-lg">👥 Фактическое присутствие сотрудников на ${data.date}</h3>
+                                <span class="text-xs bg-purple-100 text-purple-800 font-bold px-3 py-1 rounded-full">${data.menu_num ? 'Меню № ' + data.menu_num : 'Выходной / Нет меню'}</span>
+                            </div>
+                            <div class="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-3">
+                    `;
+
+                    data.points.forEach(p => {
+                        const staffVal = data.fact_staff[p.id] !== undefined ? data.fact_staff[p.id] : p.default_staff;
+                        html += `
+                            <div class="bg-gray-50 p-2.5 border rounded-md text-center">
+                                <div class="text-xs font-bold text-gray-700 truncate mb-1" title="${p.name}">${p.name}</div>
+                                <input type="number" data-point-staff-fact="${p.id}" value="${staffVal}" class="fact-staff-cell border border-gray-300 rounded px-2 py-1 text-center text-sm w-full font-bold text-blue-700 focus:ring-2 focus:ring-blue-500">
+                            </div>
+                        `;
+                    });
+
+                    html += `</div></div>`;
+
+                    if (!data.menu_num) {
+                        html += `<div class="bg-white p-8 text-center text-red-500 font-bold rounded-lg shadow">В этот день по календарю выходной — списание не производится.</div>`;
+                    } else {
+                        html += `
+                            <div class="bg-white shadow rounded-lg overflow-hidden mb-6">
+                                <div class="bg-gray-50 px-6 py-4 border-b border-gray-200">
+                                    <h3 class="text-lg font-bold text-gray-800">📦 Фактический расход продуктов (Сотрудники) за ${data.date}</h3>
+                                </div>
+                                <div class="overflow-x-auto" style="max-height: 500px;">
+                                    <table class="min-w-full divide-y divide-gray-200 text-xs border-collapse">
+                                        <thead class="bg-gray-100 sticky top-0 z-10">
+                                            <tr>
+                                                <th class="px-4 py-3 text-left font-bold text-gray-700 border-r bg-gray-100 sticky left-0 z-20 min-w-[180px]">Продукт</th>
+                                                <th class="px-3 py-3 text-center font-bold text-gray-700 border-r bg-gray-100 min-w-[70px]">Ед.</th>
+                        `;
+
+                        data.points.forEach(p => {
+                            const staffVal = data.fact_staff[p.id] !== undefined ? data.fact_staff[p.id] : p.default_staff;
+                            html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]">${p.name}<br><span class="text-[10px] text-blue-600">(${staffVal} сотр)</span></th>`;
+                        });
+
+                        html += `<th class="px-4 py-3 text-center font-bold text-blue-800 bg-blue-50">ИТОГО ФАКТ</th></tr></thead><tbody class="divide-y divide-gray-200 bg-white">`;
+
+                        for (const [prodName, rowData] of Object.entries(data.fact_consumption)) {
+                            html += `
+                                <tr class="hover:bg-gray-50">
+                                    <td class="px-4 py-3 font-medium text-gray-900 border-r bg-white sticky left-0 z-10">${prodName}</td>
+                                    <td class="px-3 py-3 text-center text-gray-500 border-r bg-gray-50">${rowData.unit}</td>
+                            `;
+                            data.points.forEach(p => {
+                                const val = rowData.points_qty[p.id] || 0;
+                                html += `<td class="px-3 py-3 text-center border-r text-gray-700 ${val > 0 ? 'font-semibold text-blue-700' : 'text-gray-300'}">${val > 0 ? val : '-'}</td>`;
+                            });
+                            html += `<td class="px-4 py-3 text-center font-bold text-blue-900 bg-blue-50">${rowData.total_fact}</td></tr>`;
+                        }
+
+                        html += `</tbody></table></div></div>`;
+                    }
+
+                    html += `
+                        <div class="bg-white shadow rounded-lg p-6">
+                            <h3 class="text-lg font-bold text-gray-800 mb-4">📅 История сохраненных дней по сотрудникам (${region})</h3>
+                            <div class="overflow-x-auto">
+                                <table class="min-w-full divide-y divide-gray-200 text-sm">
+                                    <thead class="bg-gray-100">
+                                        <tr>
+                                            <th class="px-4 py-2 text-left font-bold text-gray-700">Дата</th>
+                                            <th class="px-4 py-2 text-center font-bold text-gray-700">Регион</th>
+                                            <th class="px-4 py-2 text-center font-bold text-gray-700">Статус</th>
+                                            <th class="px-4 py-2 text-right font-bold text-gray-700">Действие</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="savedStaffDaysTableBody" class="divide-y divide-gray-200"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    `;
+
+                    container.innerHTML = html;
+                    loadSavedStaffDaysList(region);
+                } catch (err) {
+                    container.innerHTML = '<div class="text-center py-12 text-red-500 bg-white rounded-lg shadow">Ошибка загрузки данных сотрудников.</div>';
+                }
+            }
+
+            async function saveStaffFact() {
+                const dateVal = document.getElementById('staffFactDate').value;
+                const region = document.getElementById('staffFactRegionSelect').value;
+                const cells = document.querySelectorAll('.fact-staff-cell');
+                const payload = {};
+                cells.forEach(cell => {
+                    const pid = cell.getAttribute('data-point-staff-fact');
+                    payload[pid] = parseInt(cell.value) || 0;
+                });
+
+                const res = await fetch(`/api/fact-staff/staff?report_date=${dateVal}&region=${region}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                if (res.ok) {
+                    alert('Факт сотрудников сохранен и учтен в остатках!');
+                    loadStaffFactData();
+                } else alert('Ошибка сохранения.');
+            }
+
+            async function loadSavedStaffDaysList(region) {
+                const res = await fetch(`/api/fact-staff/saved-days?region=${region}`);
+                const dates = await res.json();
+                const tbody = document.getElementById('savedStaffDaysTableBody');
+                if (!tbody) return;
+                if (dates.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="4" class="text-center py-4 text-gray-400">Нет сохраненных дней для региона ${region}.</td></tr>`;
+                    return;
+                }
+                tbody.innerHTML = dates.map(dStr => `
+                    <tr class="hover:bg-gray-50">
+                        <td class="px-4 py-3 font-semibold text-gray-800">${dStr}</td>
+                        <td class="px-4 py-3 text-center text-gray-600">${region}</td>
+                        <td class="px-4 py-3 text-center"><span class="bg-green-100 text-green-800 px-2.5 py-1 rounded-full text-xs font-bold">Сохранено</span></td>
+                        <td class="px-4 py-3 text-right space-x-2">
+                            <button onclick="document.getElementById('staffFactDate').value='${dStr}'; loadStaffFactData(); window.scrollTo({top:0, behavior:'smooth'});" class="bg-blue-600 text-white px-3 py-1.5 rounded text-xs font-medium hover:bg-blue-700 transition">✏️ Редактировать</button>
+                            <button onclick="deleteStaffFactDate('${dStr}', '${region}')" class="bg-red-600 text-white px-3 py-1.5 rounded text-xs font-medium hover:bg-red-700 transition">🗑 Удалить</button>
+                        </td>
+                    </tr>
+                `).join('');
+            }
+
+            async function deleteStaffFactDate(dStr, region) {
+                if (!confirm(`Удалить сохраненный факт сотрудников за ${dStr} (${region})?`)) return;
+                const res = await fetch(`/api/fact-staff/staff?report_date=${dStr}&region=${region}`, { method: 'DELETE' });
+                if (res.ok) loadStaffFactData();
+            }
+
+            function downloadStaffFactAllRegionsExcel() {
+                const dateVal = document.getElementById('staffFactDate').value;
+                window.location.href = `/api/fact-staff/export/all-regions-excel?report_date=${dateVal}`;
+            }
+
+            async function sendStaffMenuTelegramManual() {
+                const dateVal = document.getElementById('staffFactDate').value;
+                const region = document.getElementById('staffFactRegionSelect').value;
+                if(!confirm(`Отправить меню сотрудников за ${dateVal} (${region}) в Telegram?`)) return;
+                const res = await fetch(`/api/menu-staff/generate-and-send?report_date=${dateVal}&region=${region}`, { method: 'POST' });
+                const data = await res.json();
+                alert(res.ok ? data.message : ('Ошибка: ' + (data.detail || 'Не удалось запустить отправку')));
             }
 
             async function sendMenuTelegramManual() {
@@ -1377,7 +1786,6 @@ def get_dashboard():
                             <div class="bg-gray-50 px-6 py-4 border-b border-gray-200 flex flex-wrap justify-between items-center gap-3">
                                 <h3 class="text-lg font-medium text-gray-900">📊 Чистая потребность к закупке <span class="text-xs text-blue-600 font-bold">(Фильтр: ${currentMatrixFilter})</span></h3>
                                 
-                                <!-- Блок выбора МТТ и кнопка создания накладной -->
                                 <div class="flex items-center gap-2">
                                     <select id="createDraftMttSelect" class="border border-gray-300 rounded-md px-3 py-1.5 text-xs font-bold focus:ring-2 focus:ring-amber-500 bg-white">
                                     </select>
@@ -1413,7 +1821,6 @@ def get_dashboard():
                     html += `</tbody></table></div></div>`;
                     container.innerHTML = html;
 
-                    // Заполняем выпадающий список МТТ
                     const mttSelect = document.getElementById('createDraftMttSelect');
                     if (mttSelect && data.points) {
                         mttSelect.innerHTML = data.points.map(p => `<option value="${p.id}" data-name="${p.name}">${p.name}</option>`).join('');
@@ -1546,7 +1953,6 @@ def get_fact_report(report_date: str, region: str = "Город"):
         pid = p["id"]
         child_cnt = p["default_children"]
 
-        # Округляем в большую сторону, если это штучный товар (шт)
         if unit == "шт":
           qty = math.ceil(child_cnt * kg_per_child)
         else:
@@ -1570,9 +1976,80 @@ def get_fact_report(report_date: str, region: str = "Город"):
   }
 
 
+@app.get("/api/fact-staff/report")
+def get_fact_staff_report(report_date: str, region: str = "Город"):
+  try:
+    parsed_date = date.fromisoformat(report_date)
+  except Exception:
+    parsed_date = date.today()
+
+  points_dict = load_points_from_excel(region)
+  fact_storage = load_fact_staff_settings()
+  saved_fact_staff = fact_storage.get(report_date, {}).get(region, {})
+
+  points_list = []
+  for pid, pinfo in points_dict.items():
+    staff_cnt = saved_fact_staff.get(str(pid))
+    if staff_cnt is None:
+      staff_cnt = saved_fact_staff.get(pid, 0)
+    else:
+      staff_cnt = int(staff_cnt)
+
+    points_list.append({
+        "id": pid,
+        "name": pinfo["name"],
+        "default_staff": staff_cnt,
+    })
+
+  menu_num = get_menu_number_for_date_custom(parsed_date)
+  fact_consumption = {}
+
+  if menu_num is not None:
+    menu_items = load_staff_menu_from_excel(menu_num)
+    for prod_name, pdata in menu_items.items():
+      kg_per_staff = pdata.get("qty_per_staff", 0.0)
+      unit = pdata.get("unit", "кг")
+
+      points_qty = {}
+      row_sum = 0.0
+      for p in points_list:
+        pid = p["id"]
+        staff_cnt = p["default_staff"]
+        if unit == "шт":
+          qty = math.ceil(staff_cnt * kg_per_staff)
+        else:
+          qty = round(staff_cnt * kg_per_staff, 2)
+        points_qty[pid] = qty
+        row_sum += qty
+
+      fact_consumption[prod_name] = {
+          "unit": unit,
+          "points_qty": points_qty,
+          "total_fact": math.ceil(row_sum) if unit == "шт" else round(row_sum, 2),
+      }
+  return {
+      "date": report_date,
+      "region": region,
+      "menu_num": menu_num,
+      "points": points_list,
+      "fact_staff": saved_fact_staff,
+      "fact_consumption": fact_consumption,
+  }
+
+
 @app.get("/api/fact/saved-days")
 def get_saved_days_list(region: str = "Город"):
   storage = load_fact_children_settings()
+  saved_dates = []
+  for d_str, regions_data in storage.items():
+    if regions_data and region in regions_data and regions_data[region]:
+      saved_dates.append(d_str)
+  return sorted(saved_dates, reverse=True)
+
+
+@app.get("/api/fact-staff/saved-days")
+def get_saved_staff_days_list(region: str = "Город"):
+  storage = load_fact_staff_settings()
   saved_dates = []
   for d_str, regions_data in storage.items():
     if regions_data and region in regions_data and regions_data[region]:
@@ -1599,6 +2076,7 @@ def get_balance_report(report_date: str, region: str = "Город"):
 
   points_dict = load_points_from_excel(region)
   fact_storage = load_fact_children_settings()
+  fact_staff_storage = load_fact_staff_settings()
   stock_storage = load_stock_settings()
 
   saved_fact_children_target = (
@@ -1684,6 +2162,29 @@ def get_balance_report(report_date: str, region: str = "Город"):
               consumed_between[pid][prod_name] = consumed_between[pid].get(
                   prod_name, 0.0
               ) + day_qty
+
+          day_staff_menu = load_staff_menu_from_excel(m_num)
+          day_fact_staff = (
+              fact_staff_storage.get(curr_d.isoformat(), {}).get(region, {})
+          )
+          for pid in points_dict.keys():
+            staff_cnt = day_fact_staff.get(str(pid), day_fact_staff.get(pid, 0))
+            staff_cnt = int(staff_cnt) if staff_cnt is not None else 0
+            if staff_cnt > 0:
+              if pid not in consumed_between:
+                consumed_between[pid] = {}
+              for prod_name, pdata in day_staff_menu.items():
+                unit_check = pdata.get("unit", "кг")
+                raw_consumption = pdata.get("qty_per_staff", 0.0) * staff_cnt
+                day_qty = (
+                    math.ceil(raw_consumption)
+                    if unit_check == "шт"
+                    else raw_consumption
+                )
+                consumed_between[pid][prod_name] = (
+                    consumed_between[pid].get(prod_name, 0.0) + day_qty
+                )
+
         curr_d += timedelta(days=1)
 
   balance_report = {}
@@ -1763,10 +2264,22 @@ def delete_fact_children_api(report_date: str, region: str = "Город"):
   return {"status": "success"}
 
 
+@app.post("/api/fact-staff/staff")
+def save_fact_staff_api(data: dict, report_date: str, region: str = "Город"):
+  save_fact_staff_for_date(report_date, region, data)
+  return {"status": "success"}
+
+
+@app.delete("/api/fact-staff/staff")
+def delete_fact_staff_api(report_date: str, region: str = "Город"):
+  delete_fact_staff_for_date(report_date, region)
+  return {"status": "success"}
+
+
 @app.get("/api/fact/export/all-regions-excel")
 def export_fact_all_regions_excel(report_date: str):
   try:
-    parsed_date = date.fromisoformat(report_date)
+    date.fromisoformat(report_date)
   except Exception:
     raise HTTPException(status_code=400, detail="Неверный формат даты")
 
@@ -1800,6 +2313,45 @@ def export_fact_all_regions_excel(report_date: str):
       headers={
           "Content-Disposition": (
               f"attachment; filename=Fact_Consumption_All_Regions_{report_date}.xlsx"
+          )
+      },
+  )
+
+
+@app.get("/api/fact-staff/export/all-regions-excel")
+def export_fact_staff_all_regions_excel(report_date: str):
+  try:
+    date.fromisoformat(report_date)
+  except Exception:
+    raise HTTPException(status_code=400, detail="Неверный формат даты")
+
+  output = io.BytesIO()
+  with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    for region in ["Город", "Район"]:
+      report_data = get_fact_staff_report(report_date, region)
+      points_dict = load_points_from_excel(region)
+
+      rows_data = []
+      fact_cons = report_data.get("fact_consumption", {})
+      for prod_name, pdata in fact_cons.items():
+        row = {"Продукт": prod_name, "Ед. изм.": pdata["unit"]}
+        for pid, pinfo in points_dict.items():
+          row[pinfo["name"]] = pdata["points_qty"].get(pid, 0.0)
+        row["ИТОГО ФАКТ"] = pdata["total_fact"]
+        rows_data.append(row)
+
+      df = pd.DataFrame(rows_data)
+      if df.empty:
+        df = pd.DataFrame(columns=["Продукт", "Ед. изм.", "ИТОГО ФАКТ"])
+      df.to_excel(writer, index=False, sheet_name=region)
+
+  output.seek(0)
+  return StreamingResponse(
+      output,
+      media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      headers={
+          "Content-Disposition": (
+              f"attachment; filename=Fact_Staff_Consumption_{report_date}.xlsx"
           )
       },
   )
@@ -2013,6 +2565,40 @@ def generate_and_send_menu_api(
   }
 
 
+@app.post("/api/menu-staff/generate-and-send")
+def generate_and_send_staff_menu_api(
+    report_date: str, background_tasks: BackgroundTasks, region: str = "Город"
+):
+  try:
+    parsed_date = date.fromisoformat(report_date)
+  except Exception:
+    raise HTTPException(status_code=400, detail="Неверная дата")
+
+  fact_storage = load_fact_staff_settings()
+  saved_fact = fact_storage.get(report_date, {}).get(region, {})
+
+  if not saved_fact:
+    raise HTTPException(
+        status_code=400,
+        detail=f"Нет сохраненного факта сотрудников за {report_date} ({region}).",
+    )
+
+  menu_num = get_menu_number_for_date_custom(parsed_date)
+  if not menu_num:
+    raise HTTPException(
+        status_code=400, detail="На указанную дату по календарю выходной день."
+    )
+
+  background_tasks.add_task(
+      process_and_send_staff_menu_in_background,
+      report_date=report_date,
+      region=region,
+      saved_fact=saved_fact,
+      menu_num=menu_num,
+  )
+  return {"status": "success", "message": "Отправка меню сотрудников запущена!"}
+
+
 @app.get("/api/stock/matrix/{region}")
 def get_stock_matrix_api(region: str, date: str = None):
   points_dict = load_points_from_excel(region)
@@ -2075,7 +2661,6 @@ def save_setting_api(data: dict):
   return {"status": "success"}
 
 
-# --- ЭНДПОИНТ МАТРИЦЫ РАЗНАРЯДКИ С ПОДНЕВНЫМ УЧЕТОМ И ФИЛЬТРАЦИЕЙ ---
 @app.get("/api/raznaryadka/matrix/{target_date}")
 def get_matrix_raznaryadka(
     target_date: str,
@@ -2088,7 +2673,6 @@ def get_matrix_raznaryadka(
   except ValueError:
     raise HTTPException(status_code=400, detail="Неверный формат даты")
 
-  # 1. Формируем динамический список целевых рабочих дней на N дней вперед
   target_days = []
   curr = parsed_date
   while len(target_days) < days_count:
@@ -2117,7 +2701,6 @@ def get_matrix_raznaryadka(
       for pid, pinfo in points_dict.items()
   ]
 
-  # 2. Получаем актуальную инвентаризацию
   stock_storage = load_stock_settings()
   available_inv_dates = sorted(
       [d for d in stock_storage.keys() if d <= week_start_str]
@@ -2128,7 +2711,6 @@ def get_matrix_raznaryadka(
     inv_date_used = available_inv_dates[-1]
     initial_stock = stock_storage[inv_date_used].get(region, {})
 
-  # 3. Приходы MUXSIN-FAYZ от даты инвентаризации до первого целевого дня
   purchases_storage = load_purchases_settings().get(region, {})
   purchases_between = {}
   inv_dt = (
@@ -2148,8 +2730,8 @@ def get_matrix_raznaryadka(
             purchases_between[pid].get(prod, 0.0) + p.get("qty", 0.0)
         )
 
-  # 4. Расход продуктов за прошлые дни (с учетом штучного учета для тухума)
   fact_storage = load_fact_children_settings()
+  fact_staff_storage = load_fact_staff_settings()
   consumed_between = {}
   if inv_date_used:
     inv_dt_real = date.fromisoformat(inv_date_used)
@@ -2180,9 +2762,25 @@ def get_matrix_raznaryadka(
               consumed_between[pid][prod_name] = consumed_between[pid].get(
                   prod_name, 0.0
               ) + cons_val
+
+          day_staff_menu = load_staff_menu_from_excel(menu_num)
+          day_fact_staff = fact_staff_storage.get(curr_d.isoformat(), {}).get(region, {})
+          for pid in points_dict.keys():
+            val_st = day_fact_staff.get(str(pid), day_fact_staff.get(pid, 0))
+            staff_cnt = int(val_st) if val_st is not None else 0
+            if staff_cnt > 0:
+              if pid not in consumed_between:
+                consumed_between[pid] = {}
+              for prod_name, pdata in day_staff_menu.items():
+                unit_check = pdata.get("unit", "кг")
+                raw_cons = pdata.get("qty_per_staff", 0.0) * staff_cnt
+                cons_val = math.ceil(raw_cons) if unit_check == "шт" else raw_cons
+                consumed_between[pid][prod_name] = (
+                    consumed_between[pid].get(prod_name, 0.0) + cons_val
+                )
+
         curr_d += timedelta(days=1)
 
-  # 5. Вычисление доступных остатков на складах МТТ
   effective_stock = {}
   for pid in points_dict.keys():
     effective_stock[pid] = {}
@@ -2199,7 +2797,6 @@ def get_matrix_raznaryadka(
       net_stock = (init_val + purch_val) - cons_val
       effective_stock[pid][prod] = net_stock
 
-  # 6. Поддневный расчет закупки с динамическим списком детей и вычитанием остатков
   matrix_data = {}
   working_days_count = 0
 
@@ -2211,7 +2808,9 @@ def get_matrix_raznaryadka(
     working_days_count += 1
     d_str = day_obj.isoformat()
     day_fact = fact_storage.get(d_str, {}).get(region, {})
+    day_staff_fact = fact_staff_storage.get(d_str, {}).get(region, {})
     ttk_items = load_menu_from_excel(menu_num)
+    staff_ttk_items = load_staff_menu_from_excel(menu_num)
 
     for point_id, point_info in points_dict.items():
       val_ch = day_fact.get(str(point_id), day_fact.get(point_id))
@@ -2273,7 +2872,65 @@ def get_matrix_raznaryadka(
         else:
           matrix_data[prod_name]["points_qty"][point_id] += round(net_needed, 2)
 
-  # Подсчет итогов с округлением для штучных товаров
+      val_st = day_staff_fact.get(str(point_id), day_staff_fact.get(point_id))
+      if val_st is None:
+        last_known_staff = 0
+        for prev_d in sorted(fact_staff_storage.keys(), reverse=True):
+          if prev_d <= d_str and region in fact_staff_storage[prev_d]:
+            p_val = fact_staff_storage[prev_d][region].get(
+                str(point_id), fact_staff_storage[prev_d][region].get(point_id)
+            )
+            if p_val is not None:
+              last_known_staff = int(p_val)
+              break
+        staff_cnt = last_known_staff
+      else:
+        staff_cnt = int(val_st)
+
+      if staff_cnt > 0:
+        for prod_name, data in staff_ttk_items.items():
+          kg_per_staff = data.get("qty_per_staff", 0.0)
+          unit = data["unit"]
+          gross_needed = (
+              math.ceil(kg_per_staff * staff_cnt)
+              if unit == "шт"
+              else kg_per_staff * staff_cnt
+          )
+
+          if prod_name not in matrix_data:
+            matrix_data[prod_name] = {
+                "unit": unit,
+                "points_qty": {pid: 0.0 for pid in points_dict.keys()},
+                "weekly_total": 0.0,
+            }
+
+          point_stocks = running_stock.get(point_id, {})
+          available = 0.0
+          st_key_matched = None
+          for st_prod, st_val in point_stocks.items():
+            if st_prod.strip().lower() == prod_name.strip().lower():
+              available = st_val
+              st_key_matched = st_prod
+              break
+
+          if available >= gross_needed:
+            net_needed = 0.0
+            if st_key_matched:
+              running_stock[point_id][st_key_matched] -= gross_needed
+          else:
+            net_needed = gross_needed - available
+            if st_key_matched:
+              running_stock[point_id][st_key_matched] = 0.0
+
+          if unit == "шт":
+            matrix_data[prod_name]["points_qty"][point_id] += float(
+                math.ceil(net_needed)
+            )
+          else:
+            matrix_data[prod_name]["points_qty"][point_id] += round(
+                net_needed, 2
+            )
+
   for prod_name, prod_info in matrix_data.items():
     unit = prod_info["unit"]
     row_sum = 0.0
@@ -2291,7 +2948,6 @@ def get_matrix_raznaryadka(
     else:
       prod_info["weekly_total"] = round(row_sum, 2)
 
-  # 7. Фильтрация по номенклатуре ("Все номенклатуры")
   if filter_period and filter_period != "ALL":
     periodicities = load_all_nomenclature_periodicities()
     filtered_matrix = {}
@@ -2317,7 +2973,6 @@ def get_matrix_raznaryadka(
   }
 
 
-# --- ЭНДПОИНТ ЭКСПОРТА МАТРИЦЫ РАЗНАРЯДКИ В EXCEL С ГРАНИЦАМИ И РАЗМЕРАМИ ---
 @app.get("/api/raznaryadka/export/excel")
 def export_raznaryadka_excel(
     target_date: str,
