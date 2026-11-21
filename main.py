@@ -1,25 +1,24 @@
-import asyncio
-from datetime import date, datetime, timedelta
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.responses import HTMLResponse, StreamingResponse
+from pydantic import BaseModel
+import pandas as pd
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+import os
 import io
 import json
 import math
-import os
 import re
+from datetime import date, timedelta, datetime
+import requests
+import asyncio
 import subprocess
-
-from apscheduler.schedulers.background import BackgroundScheduler
-from fastapi import BackgroundTasks, FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse
-import openpyxl
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-import pandas as pd
+from PyPDF2 import PdfReader, PdfWriter
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4, landscape
 import psycopg2
 import psycopg2.extras
-from pydantic import BaseModel
-from PyPDF2 import PdfReader, PdfWriter
-import requests
-from reportlab.lib.pagesizes import A4, landscape
-from reportlab.pdfgen import canvas
+from apscheduler.schedulers.background import BackgroundScheduler
 
 app = FastAPI(title="Catering Management API", version="1.1.0")
 
@@ -33,42 +32,39 @@ MONTH_CLOSE_PASSWORD = os.environ.get("MONTH_CLOSE_PASSWORD", "close2026")
 
 
 class CloseMonthRequest(BaseModel):
-  month: str
-  region: str = "Город"
-  password: str
+    month: str
+    region: str = "Город"
+    password: str
 
 
 def get_db_connection():
-  database_url = os.environ.get("DATABASE_URL")
-  if database_url and database_url.startswith("postgres://"):
-    database_url = database_url.replace("postgres://", "postgresql://", 1)
+    database_url = os.environ.get("DATABASE_URL")
+    if database_url and database_url.startswith("postgres://"):
+        database_url = database_url.replace("postgres://", "postgresql://", 1)
 
-  if database_url:
-    conn = psycopg2.connect(
-        database_url, cursor_factory=psycopg2.extras.RealDictCursor
-    )
-  else:
-    import sqlite3
-
-    conn = sqlite3.connect("warehouse.db")
-    conn.row_factory = sqlite3.Row
-  return conn
+    if database_url:
+        conn = psycopg2.connect(database_url, cursor_factory=psycopg2.extras.RealDictCursor)
+    else:
+        import sqlite3
+        conn = sqlite3.connect("warehouse.db")
+        conn.row_factory = sqlite3.Row
+    return conn
 
 
 def _is_postgres(conn) -> bool:
-  return conn.__class__.__module__.startswith("psycopg2")
+    return conn.__class__.__module__.startswith("psycopg2")
 
 
 def init_db():
-  conn = get_db_connection()
-  cursor = conn.cursor()
-  cursor.execute("""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS app_settings (
             date_str VARCHAR(20) PRIMARY KEY,
             data JSONB
         );
     """)
-  cursor.execute("""
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS stock_acts (
             date_str VARCHAR(20),
             region VARCHAR(50),
@@ -76,7 +72,7 @@ def init_db():
             PRIMARY KEY (date_str, region)
         );
     """)
-  cursor.execute("""
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS fact_children (
             date_str VARCHAR(20),
             region VARCHAR(50),
@@ -84,7 +80,7 @@ def init_db():
             PRIMARY KEY (date_str, region)
         );
     """)
-  cursor.execute("""
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS fact_staff (
             date_str VARCHAR(20),
             region VARCHAR(50),
@@ -92,7 +88,7 @@ def init_db():
             PRIMARY KEY (date_str, region)
         );
     """)
-  cursor.execute("""
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS closed_months (
             month_str VARCHAR(10),
             region VARCHAR(50),
@@ -101,9 +97,9 @@ def init_db():
             PRIMARY KEY (month_str, region)
         );
     """)
-  conn.commit()
-  cursor.close()
-  conn.close()
+    conn.commit()
+    cursor.close()
+    conn.close()
 
 
 scheduler = BackgroundScheduler()
@@ -111,312 +107,263 @@ scheduler = BackgroundScheduler()
 
 @app.on_event("startup")
 def startup_event():
-  init_db()
-  scheduler.start()
+    init_db()
+    scheduler.start()
 
 
 @app.on_event("shutdown")
 def shutdown_event():
-  scheduler.shutdown()
+    scheduler.shutdown()
 
 
 def is_month_closed(date_str: str, region: str) -> bool:
-  if not date_str or len(date_str) < 7:
-    return False
-  month_str = date_str[:7]
-  try:
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    ph = "%s" if _is_postgres(conn) else "?"
-    cursor.execute(
-        f"SELECT 1 FROM closed_months WHERE month_str = {ph} AND region ="
-        f" {ph};",
-        (month_str, region),
-    )
-    row = cursor.fetchone()
-    cursor.close()
-    conn.close()
-    return row is not None
-  except Exception as e:
-    print(f"Ошибка проверки закрытия месяца: {e}")
-    return False
+    if not date_str or len(date_str) < 7:
+        return False
+    month_str = date_str[:7]
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        ph = "%s" if _is_postgres(conn) else "?"
+        cursor.execute(f"SELECT 1 FROM closed_months WHERE month_str = {ph} AND region = {ph};", (month_str, region))
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        return row is not None
+    except Exception as e:
+        print(f"Ошибка проверки закрытия месяца: {e}")
+        return False
 
 
 def get_closed_month_snapshot(month_str: str, region: str) -> dict | None:
-  try:
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    ph = "%s" if _is_postgres(conn) else "?"
-    cursor.execute(
-        f"SELECT snapshot, closed_at FROM closed_months WHERE month_str = {ph}"
-        f" AND region = {ph};",
-        (month_str, region),
-    )
-    row = cursor.fetchone()
-    cursor.close()
-    conn.close()
-    if row:
-      raw_snap = row["snapshot"]
-      snap = raw_snap if isinstance(raw_snap, dict) else json.loads(raw_snap)
-      snap["closed_at"] = row["closed_at"]
-      return snap
-  except Exception as e:
-    print(f"Ошибка чтения снимка закрытого месяца: {e}")
-  return None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        ph = "%s" if _is_postgres(conn) else "?"
+        cursor.execute(f"SELECT snapshot, closed_at FROM closed_months WHERE month_str = {ph} AND region = {ph};", (month_str, region))
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        if row:
+            raw_snap = row["snapshot"]
+            snap = raw_snap if isinstance(raw_snap, dict) else json.loads(raw_snap)
+            snap["closed_at"] = row["closed_at"]
+            return snap
+    except Exception as e:
+        print(f"Ошибка чтения снимка закрытого месяца: {e}")
+    return None
 
 
 def get_closed_day_snapshot(date_str: str, region: str) -> dict | None:
-  if not date_str or len(date_str) < 7:
-    return None
-  snap = get_closed_month_snapshot(date_str[:7], region)
-  if not snap:
-    return None
-  return snap.get("days", {}).get(date_str)
+    if not date_str or len(date_str) < 7:
+        return None
+    snap = get_closed_month_snapshot(date_str[:7], region)
+    if not snap:
+        return None
+    return snap.get("days", {}).get(date_str)
 
 
 def assert_month_open(date_str: str, region: str):
-  if is_month_closed(date_str, region):
-    raise HTTPException(
-        status_code=423,
-        detail=(
-            f"Период за {date_str} ({region}) закрыт и заморожен. Изменение и"
-            " удаление запрещены."
-        ),
-    )
+    if is_month_closed(date_str, region):
+        raise HTTPException(
+            status_code=423,
+            detail=f"Период за {date_str} ({region}) закрыт и заморожен. Изменение и удаление запрещены."
+        )
 
 
 def load_manual_settings() -> dict:
-  try:
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    ph = "%s" if _is_postgres(conn) else "?"
-    cursor.execute(
-        f"SELECT data FROM app_settings WHERE date_str = {ph}",
-        ("calendar_config",),
-    )
-    row = cursor.fetchone()
-    cursor.close()
-    conn.close()
-    if row:
-      return (
-          row["data"] if isinstance(row["data"], dict) else json.loads(row["data"])
-      )
-  except Exception as e:
-    print(f"Ошибка загрузки календаря из БД: {e}")
-  return {"days": {}}
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        ph = "%s" if _is_postgres(conn) else "?"
+        cursor.execute(f"SELECT data FROM app_settings WHERE date_str = {ph}", ("calendar_config",))
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        if row:
+            return row["data"] if isinstance(row["data"], dict) else json.loads(row["data"])
+    except Exception as e:
+        print(f"Ошибка загрузки календаря из БД: {e}")
+    return {"days": {}}
 
 
 def save_manual_settings(settings: dict):
-  try:
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    json_val = json.dumps(settings, ensure_ascii=False)
-    if _is_postgres(conn):
-      cursor.execute(
-          """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        json_val = json.dumps(settings, ensure_ascii=False)
+        if _is_postgres(conn):
+            cursor.execute("""
                 INSERT INTO app_settings (date_str, data) VALUES ('calendar_config', %s)
                 ON CONFLICT (date_str) DO UPDATE SET data = EXCLUDED.data;
-            """,
-          (json_val,),
-      )
-    else:
-      cursor.execute(
-          """
+            """, (json_val,))
+        else:
+            cursor.execute("""
                 INSERT INTO app_settings (date_str, data) VALUES ('calendar_config', ?)
                 ON CONFLICT (date_str) DO UPDATE SET data = excluded.data;
-            """,
-          (json_val,),
-      )
-    conn.commit()
-    cursor.close()
-    conn.close()
-  except Exception as e:
-    print(f"Ошибка сохранения календаря в БД: {e}")
+            """, (json_val,))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"Ошибка сохранения календаря в БД: {e}")
 
 
 def load_stock_settings() -> dict:
-  stock_map = {}
-  try:
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT date_str, region, data FROM stock_acts;")
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    for r in rows:
-      d = r["date_str"]
-      reg = r["region"]
-      val = r["data"] if isinstance(r["data"], dict) else json.loads(r["data"])
-      if d not in stock_map:
-        stock_map[d] = {}
-      stock_map[d][reg] = val
-  except Exception as e:
-    print(f"Ошибка загрузки инвентаризации из БД: {e}")
-  return stock_map
+    stock_map = {}
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT date_str, region, data FROM stock_acts;")
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        for r in rows:
+            d = str(r["date_str"]).strip()
+            reg = str(r["region"]).strip()
+            val = r["data"] if isinstance(r["data"], dict) else json.loads(r["data"])
+            if d not in stock_map:
+                stock_map[d] = {}
+            stock_map[d][reg] = val
+    except Exception as e:
+        print(f"Ошибка загрузки инвентаризации из БД: {e}")
+    return stock_map
 
 
 def save_stock_settings_for_date(date_str: str, region: str, data: dict):
-  conn = get_db_connection()
-  cursor = conn.cursor()
-  json_val = json.dumps(data, ensure_ascii=False)
-  if _is_postgres(conn):
-    cursor.execute(
-        """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    json_val = json.dumps(data, ensure_ascii=False)
+    if _is_postgres(conn):
+        cursor.execute("""
             INSERT INTO stock_acts (date_str, region, data) VALUES (%s, %s, %s)
             ON CONFLICT (date_str, region) DO UPDATE SET data = EXCLUDED.data;
-        """,
-        (date_str, region, json_val),
-    )
-  else:
-    cursor.execute(
-        """
+        """, (date_str, region, json_val))
+    else:
+        cursor.execute("""
             INSERT INTO stock_acts (date_str, region, data) VALUES (?, ?, ?)
             ON CONFLICT (date_str, region) DO UPDATE SET data = excluded.data;
-        """,
-        (date_str, region, json_val),
-    )
-  conn.commit()
-  cursor.close()
-  conn.close()
+        """, (date_str, region, json_val))
+    conn.commit()
+    cursor.close()
+    conn.close()
 
 
 def delete_stock_settings_for_date(date_str: str, region: str):
-  conn = get_db_connection()
-  cursor = conn.cursor()
-  ph = "%s" if _is_postgres(conn) else "?"
-  cursor.execute(
-      f"DELETE FROM stock_acts WHERE date_str = {ph} AND region = {ph};",
-      (date_str, region),
-  )
-  conn.commit()
-  cursor.close()
-  conn.close()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    ph = "%s" if _is_postgres(conn) else "?"
+    cursor.execute(f"DELETE FROM stock_acts WHERE date_str = {ph} AND region = {ph};", (date_str, region))
+    conn.commit()
+    cursor.close()
+    conn.close()
 
 
 def load_fact_children_settings() -> dict:
-  fact_map = {}
-  try:
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT date_str, region, data FROM fact_children;")
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    for r in rows:
-      d = r["date_str"]
-      reg = r["region"]
-      val = r["data"] if isinstance(r["data"], dict) else json.loads(r["data"])
-      if d not in fact_map:
-        fact_map[d] = {}
-      fact_map[d][reg] = val
-  except Exception as e:
-    print(f"Ошибка загрузки факта детей из БД: {e}")
-  return fact_map
+    fact_map = {}
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT date_str, region, data FROM fact_children;")
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        for r in rows:
+            d = str(r["date_str"]).strip()
+            reg = str(r["region"]).strip()
+            val = r["data"] if isinstance(r["data"], dict) else json.loads(r["data"])
+            if d not in fact_map:
+                fact_map[d] = {}
+            fact_map[d][reg] = val
+    except Exception as e:
+        print(f"Ошибка загрузки факта детей из БД: {e}")
+    return fact_map
 
 
 def save_fact_children_for_date(date_str: str, region: str, data: dict):
-  conn = get_db_connection()
-  cursor = conn.cursor()
-  json_val = json.dumps(data, ensure_ascii=False)
-  if _is_postgres(conn):
-    cursor.execute(
-        """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    json_val = json.dumps(data, ensure_ascii=False)
+    if _is_postgres(conn):
+        cursor.execute("""
             INSERT INTO fact_children (date_str, region, data) VALUES (%s, %s, %s)
             ON CONFLICT (date_str, region) DO UPDATE SET data = EXCLUDED.data;
-        """,
-        (date_str, region, json_val),
-    )
-  else:
-    cursor.execute(
-        """
+        """, (date_str, region, json_val))
+    else:
+        cursor.execute("""
             INSERT INTO fact_children (date_str, region, data) VALUES (?, ?, ?)
             ON CONFLICT (date_str, region) DO UPDATE SET data = excluded.data;
-        """,
-        (date_str, region, json_val),
-    )
-  conn.commit()
-  cursor.close()
-  conn.close()
+        """, (date_str, region, json_val))
+    conn.commit()
+    cursor.close()
+    conn.close()
 
 
 def delete_fact_children_for_date(date_str: str, region: str):
-  conn = get_db_connection()
-  cursor = conn.cursor()
-  ph = "%s" if _is_postgres(conn) else "?"
-  cursor.execute(
-      f"DELETE FROM fact_children WHERE date_str = {ph} AND region = {ph};",
-      (date_str, region),
-  )
-  conn.commit()
-  cursor.close()
-  conn.close()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    ph = "%s" if _is_postgres(conn) else "?"
+    cursor.execute(f"DELETE FROM fact_children WHERE date_str = {ph} AND region = {ph};", (date_str, region))
+    conn.commit()
+    cursor.close()
+    conn.close()
 
 
 def load_fact_staff_settings() -> dict:
-  staff_map = {}
-  try:
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT date_str, region, data FROM fact_staff;")
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    for r in rows:
-      d = r["date_str"]
-      reg = r["region"]
-      val = r["data"] if isinstance(r["data"], dict) else json.loads(r["data"])
-      if d not in staff_map:
-        staff_map[d] = {}
-      staff_map[d][reg] = val
-  except Exception as e:
-    print(f"Ошибка загрузки факта сотрудников из БД: {e}")
-  return staff_map
+    staff_map = {}
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT date_str, region, data FROM fact_staff;")
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        for r in rows:
+            d = str(r["date_str"]).strip()
+            reg = str(r["region"]).strip()
+            val = r["data"] if isinstance(r["data"], dict) else json.loads(r["data"])
+            if d not in staff_map:
+                staff_map[d] = {}
+            staff_map[d][reg] = val
+    except Exception as e:
+        print(f"Ошибка загрузки факта сотрудников из БД: {e}")
+    return staff_map
 
 
 def save_fact_staff_for_date(date_str: str, region: str, data: dict):
-  conn = get_db_connection()
-  cursor = conn.cursor()
-  json_val = json.dumps(data, ensure_ascii=False)
-  if _is_postgres(conn):
-    cursor.execute(
-        """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    json_val = json.dumps(data, ensure_ascii=False)
+    if _is_postgres(conn):
+        cursor.execute("""
             INSERT INTO fact_staff (date_str, region, data) VALUES (%s, %s, %s)
             ON CONFLICT (date_str, region) DO UPDATE SET data = EXCLUDED.data;
-        """,
-        (date_str, region, json_val),
-    )
-  else:
-    cursor.execute(
-        """
+        """, (date_str, region, json_val))
+    else:
+        cursor.execute("""
             INSERT INTO fact_staff (date_str, region, data) VALUES (?, ?, ?)
             ON CONFLICT (date_str, region) DO UPDATE SET data = excluded.data;
-        """,
-        (date_str, region, json_val),
-    )
-  conn.commit()
-  cursor.close()
-  conn.close()
+        """, (date_str, region, json_val))
+    conn.commit()
+    cursor.close()
+    conn.close()
 
 
 def delete_fact_staff_for_date(date_str: str, region: str):
-  conn = get_db_connection()
-  cursor = conn.cursor()
-  ph = "%s" if _is_postgres(conn) else "?"
-  cursor.execute(
-      f"DELETE FROM fact_staff WHERE date_str = {ph} AND region = {ph};",
-      (date_str, region),
-  )
-  conn.commit()
-  cursor.close()
-  conn.close()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    ph = "%s" if _is_postgres(conn) else "?"
+    cursor.execute(f"DELETE FROM fact_staff WHERE date_str = {ph} AND region = {ph};", (date_str, region))
+    conn.commit()
+    cursor.close()
+    conn.close()
 
 
 def load_purchases_settings() -> dict:
-  purchases_by_region = {"Город": {}, "Район": {}}
-  try:
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    query = """
+    purchases_by_region = {"Город": {}, "Район": {}}
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        query = """
             SELECT d.date, c.category, c.client_number, i.name as product_name, si.quantity
             FROM sales_docs d
             JOIN clients c ON d.client_id = c.id
@@ -424,650 +371,545 @@ def load_purchases_settings() -> dict:
             JOIN items i ON si.item_id = i.id
             WHERE d.organization = 'MUXSIN-FAYZ'
         """
-    cursor.execute(query)
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
 
-    points_gorod = load_points_from_excel("Город")
-    points_rayon = load_points_from_excel("Район")
+        points_gorod = load_points_from_excel("Город")
+        points_rayon = load_points_from_excel("Район")
 
-    for r in rows:
-      date_str = str(r["date"]).split("T")[0] if r["date"] else ""
-      category_raw = str(r["category"]).strip().lower()
+        for r in rows:
+            date_str = str(r["date"]).split("T")[0] if r["date"] else ""
+            category_raw = str(r["category"]).strip().lower()
 
-      region = (
-          "Город" if "город" in category_raw or "текущие" in category_raw else "Район"
-      )
+            region = "Город" if ("город" in category_raw or "текущие" in category_raw) else "Район"
 
-      points_dict = points_gorod if region == "Город" else points_rayon
-      db_client_num = int(r["client_number"])
+            points_dict = points_gorod if region == "Город" else points_rayon
+            db_client_num = int(r["client_number"])
 
-      target_point_id = None
-      for pid, pinfo in points_dict.items():
-        name_str = str(pinfo["name"])
-        numbers = re.findall(r"\d+", name_str)
-        if numbers and int(numbers[0]) == db_client_num:
-          target_point_id = pid
-          break
+            target_point_id = None
+            for pid, pinfo in points_dict.items():
+                name_str = str(pinfo["name"])
+                numbers = re.findall(r'\d+', name_str)
+                if numbers and int(numbers[0]) == db_client_num:
+                    target_point_id = pid
+                    break
 
-      if target_point_id:
-        if region not in purchases_by_region:
-          purchases_by_region[region] = {}
-        if target_point_id not in purchases_by_region[region]:
-          purchases_by_region[region][target_point_id] = []
+            if target_point_id:
+                if region not in purchases_by_region:
+                    purchases_by_region[region] = {}
+                if target_point_id not in purchases_by_region[region]:
+                    purchases_by_region[region][target_point_id] = []
 
-        purchases_by_region[region][target_point_id].append({
-            "date": date_str,
-            "product": r["product_name"],
-            "qty": float(r["quantity"]),
-        })
-  except Exception as e:
-    print(f"Ошибка чтения приходов из базы отгрузок MUXSIN-FAYZ: {e}")
+                purchases_by_region[region][target_point_id].append({
+                    "date": date_str,
+                    "product": r["product_name"],
+                    "qty": float(r["quantity"])
+                })
+    except Exception as e:
+        print(f"Ошибка чтения приходов из базы отгрузок MUXSIN-FAYZ: {e}")
 
-  return purchases_by_region
+    return purchases_by_region
 
 
 def calculate_calendar_dynamic(start_date: date, end_date: date) -> dict:
-  settings = load_manual_settings()
-  manual_days = settings.get("days", {})
-  global_start = date(2026, 1, 1)
-  calc_start = min(global_start, start_date)
+    settings = load_manual_settings()
+    manual_days = settings.get("days", {})
+    global_start = date(2026, 1, 1)
+    calc_start = min(global_start, start_date)
 
-  current_menu = 1
-  calendar_map = {}
-  current = calc_start
+    current_menu = 1
+    calendar_map = {}
+    current = calc_start
 
-  while current <= end_date:
-    d_str = current.isoformat()
-    day_conf = manual_days.get(d_str, {})
-    is_holiday = day_conf.get("is_holiday", False)
-    if current.weekday() >= 5 and "is_holiday" not in day_conf:
-      is_holiday = True
-    forced_menu = day_conf.get("menu", None)
+    while current <= end_date:
+        d_str = current.isoformat()
+        day_conf = manual_days.get(d_str, {})
+        is_holiday = day_conf.get("is_holiday", False)
+        if current.weekday() >= 5 and "is_holiday" not in day_conf:
+            is_holiday = True
+        forced_menu = day_conf.get("menu", None)
 
-    if is_holiday:
-      if current >= start_date:
-        calendar_map[d_str] = {
-            "date": d_str,
-            "is_holiday": True,
-            "menu": None,
-            "forced": False,
-        }
-    else:
-      if forced_menu is not None:
-        current_menu = int(forced_menu)
-        if current >= start_date:
-          calendar_map[d_str] = {
-              "date": d_str,
-              "is_holiday": False,
-              "menu": current_menu,
-              "forced": True,
-          }
-      else:
-        if current >= start_date:
-          calendar_map[d_str] = {
-              "date": d_str,
-              "is_holiday": False,
-              "menu": current_menu,
-              "forced": False,
-          }
-      current_menu = (current_menu % 10) + 1
-    current += timedelta(days=1)
-  return calendar_map
+        if is_holiday:
+            if current >= start_date:
+                calendar_map[d_str] = {
+                    "date": d_str,
+                    "is_holiday": True,
+                    "menu": None,
+                    "forced": False
+                }
+        else:
+            if forced_menu is not None:
+                current_menu = int(forced_menu)
+                if current >= start_date:
+                    calendar_map[d_str] = {
+                        "date": d_str,
+                        "is_holiday": False,
+                        "menu": current_menu,
+                        "forced": True
+                    }
+            else:
+                if current >= start_date:
+                    calendar_map[d_str] = {
+                        "date": d_str,
+                        "is_holiday": False,
+                        "menu": current_menu,
+                        "forced": False
+                    }
+            current_menu = (current_menu % 10) + 1
+        current += timedelta(days=1)
+    return calendar_map
 
 
 def get_menu_number_for_date_custom(target_date: date) -> int | None:
-  closed_day = get_closed_day_snapshot(target_date.isoformat(), "Город")
-  if closed_day and "menu_num" in closed_day:
-    return closed_day["menu_num"]
-  closed_day_r = get_closed_day_snapshot(target_date.isoformat(), "Район")
-  if closed_day_r and "menu_num" in closed_day_r:
-    return closed_day_r["menu_num"]
+    closed_day = get_closed_day_snapshot(target_date.isoformat(), "Город")
+    if closed_day and "menu_num" in closed_day:
+        return closed_day["menu_num"]
+    closed_day_r = get_closed_day_snapshot(target_date.isoformat(), "Район")
+    if closed_day_r and "menu_num" in closed_day_r:
+        return closed_day_r["menu_num"]
 
-  start = date(2026, 1, 1)
-  cal = calculate_calendar_dynamic(start, target_date + timedelta(days=30))
-  d_str = target_date.isoformat()
-  if d_str in cal:
-    day_info = cal[d_str]
-    if day_info["is_holiday"]:
-      return None
-    return day_info["menu"]
-  return None
+    start = date(2026, 1, 1)
+    cal = calculate_calendar_dynamic(start, target_date + timedelta(days=30))
+    d_str = target_date.isoformat()
+    if d_str in cal:
+        day_info = cal[d_str]
+        if day_info["is_holiday"]:
+            return None
+        return day_info["menu"]
+    return None
 
 
 def load_points_from_excel(region: str = "Город") -> dict:
-  try:
-    df = pd.read_excel("Location.xlsx", sheet_name=region, header=None)
-    points = {}
-    for idx, row in df.iterrows():
-      mtt_name = str(row.iloc[0]).strip()
-      if mtt_name and mtt_name != "nan":
-        children = 0
-        if len(row) > 1 and pd.notna(row.iloc[1]):
-          try:
-            children = int(float(row.iloc[1]))
-          except ValueError:
-            children = 0
-        points[idx + 1] = {"name": mtt_name, "children_count": children}
-    return points
-  except Exception as e:
-    print(f"Ошибка чтения точек ({region}): {e}")
-    return {}
+    try:
+        df = pd.read_excel("Location.xlsx", sheet_name=region, header=None)
+        points = {}
+        for idx, row in df.iterrows():
+            mtt_name = str(row.iloc[0]).strip()
+            if mtt_name and mtt_name != 'nan':
+                children = 0
+                if len(row) > 1 and pd.notna(row.iloc[1]):
+                    try:
+                        children = int(float(row.iloc[1]))
+                    except ValueError:
+                        children = 0
+                points[idx + 1] = {"name": mtt_name, "children_count": children}
+        return points
+    except Exception as e:
+        print(f"Ошибка чтения точек ({region}): {e}")
+        return {}
 
 
 def load_menu_from_excel(menu_num: int) -> dict:
-  if menu_num in _MENU_CACHE:
-    return _MENU_CACHE[menu_num]
+    if menu_num in _MENU_CACHE:
+        return _MENU_CACHE[menu_num]
 
-  sheet_name = f"{menu_num}-Меню"
-  try:
-    df = pd.read_excel("Menu.xlsx", sheet_name=sheet_name)
-    menu_items = {}
-    for _, row in df.iterrows():
-      prod_name = str(row.iloc[0]).strip()
-      val = float(row.iloc[1]) if pd.notna(row.iloc[1]) else 0.0
-      unit = (
-          str(row.iloc[2]).strip().lower()
-          if len(row) > 2 and pd.notna(row.iloc[2])
-          else "граммов"
-      )
+    sheet_name = f"{menu_num}-Меню"
+    try:
+        df = pd.read_excel("Menu.xlsx", sheet_name=sheet_name)
+        menu_items = {}
+        for _, row in df.iterrows():
+            prod_name = str(row.iloc[0]).strip()
+            val = float(row.iloc[1]) if pd.notna(row.iloc[1]) else 0.0
+            unit = str(row.iloc[2]).strip().lower() if len(row) > 2 and pd.notna(row.iloc[2]) else "граммов"
 
-      if "тухум" in prod_name.lower() or "яйц" in prod_name.lower():
-        qty_in_units = val / 55.0
-        display_unit = "шт"
-        menu_items[prod_name] = {
-            "qty_per_child": qty_in_units,
-            "unit": display_unit,
-        }
-      elif "грам" in unit or "гр" in unit:
-        qty_in_kg = val / 1000.0
-        display_unit = "кг"
-        menu_items[prod_name] = {
-            "qty_per_child": qty_in_kg,
-            "unit": display_unit,
-        }
-      else:
-        qty_in_kg = val
-        display_unit = unit if unit else "шт"
-        menu_items[prod_name] = {
-            "qty_per_child": qty_in_kg,
-            "unit": display_unit,
-        }
+            if "тухум" in prod_name.lower() or "яйц" in prod_name.lower():
+                qty_in_units = val / 55.0
+                display_unit = "шт"
+                menu_items[prod_name] = {"qty_per_child": qty_in_units, "unit": display_unit}
+            elif "грам" in unit or "гр" in unit:
+                qty_in_kg = val / 1000.0
+                display_unit = "кг"
+                menu_items[prod_name] = {"qty_per_child": qty_in_kg, "unit": display_unit}
+            else:
+                qty_in_kg = val
+                display_unit = unit if unit else "шт"
+                menu_items[prod_name] = {"qty_per_child": qty_in_kg, "unit": display_unit}
 
-    _MENU_CACHE[menu_num] = menu_items
-    return menu_items
-  except Exception as e:
-    print(f"Ошибка чтения листа {sheet_name}: {e}")
-    return {}
+        _MENU_CACHE[menu_num] = menu_items
+        return menu_items
+    except Exception as e:
+        print(f"Ошибка чтения листа {sheet_name}: {e}")
+        return {}
 
 
 def load_staff_menu_from_excel(menu_num: int) -> dict:
-  if menu_num in _STAFF_MENU_CACHE:
-    return _STAFF_MENU_CACHE[menu_num]
+    if menu_num in _STAFF_MENU_CACHE:
+        return _STAFF_MENU_CACHE[menu_num]
 
-  sheet_name = f"{menu_num}-Меню"
-  try:
-    df = pd.read_excel("Menu_staff.xlsx", sheet_name=sheet_name)
-    menu_items = {}
-    for _, row in df.iterrows():
-      prod_name = str(row.iloc[0]).strip()
-      val = float(row.iloc[1]) if pd.notna(row.iloc[1]) else 0.0
-      unit = (
-          str(row.iloc[2]).strip().lower()
-          if len(row) > 2 and pd.notna(row.iloc[2])
-          else "граммов"
-      )
+    sheet_name = f"{menu_num}-Меню"
+    try:
+        df = pd.read_excel("Menu_staff.xlsx", sheet_name=sheet_name)
+        menu_items = {}
+        for _, row in df.iterrows():
+            prod_name = str(row.iloc[0]).strip()
+            val = float(row.iloc[1]) if pd.notna(row.iloc[1]) else 0.0
+            unit = str(row.iloc[2]).strip().lower() if len(row) > 2 and pd.notna(row.iloc[2]) else "граммов"
 
-      if "тухум" in prod_name.lower() or "яйц" in prod_name.lower():
-        qty_in_units = val / 55.0
-        display_unit = "шт"
-        menu_items[prod_name] = {
-            "qty_per_staff": qty_in_units,
-            "unit": display_unit,
-        }
-      elif "грам" in unit or "гр" in unit:
-        qty_in_kg = val / 1000.0
-        display_unit = "кг"
-        menu_items[prod_name] = {
-            "qty_per_staff": qty_in_kg,
-            "unit": display_unit,
-        }
-      else:
-        qty_in_kg = val
-        display_unit = unit if unit else "шт"
-        menu_items[prod_name] = {
-            "qty_per_staff": qty_in_kg,
-            "unit": display_unit,
-        }
+            if "тухум" in prod_name.lower() or "яйц" in prod_name.lower():
+                qty_in_units = val / 55.0
+                display_unit = "шт"
+                menu_items[prod_name] = {"qty_per_staff": qty_in_units, "unit": display_unit}
+            elif "грам" in unit or "гр" in unit:
+                qty_in_kg = val / 1000.0
+                display_unit = "кг"
+                menu_items[prod_name] = {"qty_per_staff": qty_in_kg, "unit": display_unit}
+            else:
+                qty_in_kg = val
+                display_unit = unit if unit else "шт"
+                menu_items[prod_name] = {"qty_per_staff": qty_in_kg, "unit": display_unit}
 
-    _STAFF_MENU_CACHE[menu_num] = menu_items
-    return menu_items
-  except Exception as e:
-    print(f"Ошибка чтения листа сотрудников {sheet_name}: {e}")
-    return {}
+        _STAFF_MENU_CACHE[menu_num] = menu_items
+        return menu_items
+    except Exception as e:
+        print(f"Ошибка чтения листа сотрудников {sheet_name}: {e}")
+        return {}
 
 
 def load_all_nomenclature_periodicities() -> dict:
-  mapping = {}
-  try:
-    df = pd.read_excel("Menu.xlsx", sheet_name="Все номенклатуры")
-    for _, row in df.iterrows():
-      prod = str(row.iloc[0]).strip()
-      period = str(row.iloc[1]).strip()
-      if prod and prod != "nan":
-        mapping[prod] = period
-  except Exception as e:
-    print(f"Ошибка чтения листа 'Все номенклатуры': {e}")
-  return mapping
+    mapping = {}
+    try:
+        df = pd.read_excel("Menu.xlsx", sheet_name="Все номенклатуры")
+        for _, row in df.iterrows():
+            prod = str(row.iloc[0]).strip()
+            period = str(row.iloc[1]).strip()
+            if prod and prod != 'nan':
+                mapping[prod] = period
+    except Exception as e:
+        print(f"Ошибка чтения листа 'Все номенклатуры': {e}")
+    return mapping
 
 
 def get_all_products_with_units() -> dict:
-  products = {}
-  for i in range(1, 11):
-    for items in (load_menu_from_excel(i), load_staff_menu_from_excel(i)):
-      for p, info in items.items():
-        if p not in products:
-          products[p] = info["unit"]
-  return dict(sorted(products.items()))
+    products = {}
+    for i in range(1, 11):
+        for items in (load_menu_from_excel(i), load_staff_menu_from_excel(i)):
+            for p, info in items.items():
+                if p not in products:
+                    products[p] = info["unit"]
+    return dict(sorted(products.items()))
 
 
 def _safe_int_or_zero(val) -> int:
-  if val is None or val == "":
-    return 0
-  try:
-    v = int(float(val))
-    return v if v > 0 else 0
-  except Exception:
-    return 0
+    if val is None or val == "":
+        return 0
+    try:
+        v = int(float(val))
+        return v if v > 0 else 0
+    except Exception:
+        return 0
 
 
 def _close_single_month(month: str, region: str) -> dict:
-  try:
-    parts = month.split("-")
-    year, m = int(parts[0]), int(parts[1])
-    if not (1 <= m <= 12):
-      raise ValueError("Месяц вне диапазона")
-    start_d = date(year, m, 1)
-    end_d = (
-        date(year + 1, 1, 1) - timedelta(days=1)
-        if m == 12
-        else date(year, m + 1, 1) - timedelta(days=1)
-    )
-  except Exception:
-    raise HTTPException(
-        status_code=400, detail="Неверный формат месяца (ожидается YYYY-MM)"
-    )
+    try:
+        parts = month.split("-")
+        year, m = int(parts[0]), int(parts[1])
+        if not (1 <= m <= 12):
+            raise ValueError("Месяц вне диапазона")
+        start_d = date(year, m, 1)
+        end_d = date(year + 1, 1, 1) - timedelta(days=1) if m == 12 else date(year, m + 1, 1) - timedelta(days=1)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Неверный формат месяца (ожидается YYYY-MM)")
 
-  if get_closed_month_snapshot(month, region) is not None:
-    raise HTTPException(
-        status_code=400,
-        detail=f"Месяц {month} ({region}) уже закрыт и заморожен навсегда.",
-    )
+    if get_closed_month_snapshot(month, region) is not None:
+        raise HTTPException(status_code=400, detail=f"Месяц {month} ({region}) уже закрыт и заморожен навсегда.")
 
-  points_dict = load_points_from_excel(region)
-  fact_children_all = load_fact_children_settings()
-  fact_staff_all = load_fact_staff_settings()
+    points_dict = load_points_from_excel(region)
+    fact_children_all = load_fact_children_settings()
+    fact_staff_all = load_fact_staff_settings()
 
-  days_snapshot = {}
-  curr = start_d
-  while curr <= end_d:
-    d_str = curr.isoformat()
-    menu_num = get_menu_number_for_date_custom(curr)
-    saved_ch = fact_children_all.get(d_str, {}).get(region, {})
-    saved_st = fact_staff_all.get(d_str, {}).get(region, {})
+    days_snapshot = {}
+    curr = start_d
+    while curr <= end_d:
+        d_str = curr.isoformat()
+        menu_num = get_menu_number_for_date_custom(curr)
+        saved_ch = fact_children_all.get(d_str, {}).get(region, {})
+        saved_st = fact_staff_all.get(d_str, {}).get(region, {})
 
-    children_counts = {}
-    staff_counts = {}
-    for pid in points_dict.keys():
-      raw_ch = saved_ch.get(str(pid), saved_ch.get(pid, 0))
-      raw_st = saved_st.get(str(pid), saved_st.get(pid, 0))
-      children_counts[str(pid)] = _safe_int_or_zero(raw_ch)
-      staff_counts[str(pid)] = _safe_int_or_zero(raw_st)
-
-    children_consumption = {}
-    staff_consumption = {}
-    if menu_num is not None:
-      menu_ch = load_menu_from_excel(menu_num)
-      for prod_name, pdata in menu_ch.items():
-        unit = pdata.get("unit", "кг")
-        q_per = pdata.get("qty_per_child", 0.0)
-        pts_q = {}
-        total_q = 0.0
+        children_counts = {}
+        staff_counts = {}
         for pid in points_dict.keys():
-          cnt = children_counts[str(pid)]
-          q = (
-              float(math.ceil(cnt * q_per))
-              if unit == "шт"
-              else round(cnt * q_per, 2)
-          )
-          pts_q[str(pid)] = q
-          total_q += q
-        children_consumption[prod_name] = {
-            "unit": unit,
-            "points_qty": pts_q,
-            "total": (
-                float(math.ceil(total_q))
-                if unit == "шт"
-                else round(total_q, 2)
-            ),
-        }
+            raw_ch = saved_ch.get(str(pid), saved_ch.get(pid, 0))
+            raw_st = saved_st.get(str(pid), saved_st.get(pid, 0))
+            children_counts[str(pid)] = _safe_int_or_zero(raw_ch)
+            staff_counts[str(pid)] = _safe_int_or_zero(raw_st)
 
-      menu_st = load_staff_menu_from_excel(menu_num)
-      for prod_name, pdata in menu_st.items():
-        unit = pdata.get("unit", "кг")
-        q_per = pdata.get("qty_per_staff", 0.0)
-        pts_q = {}
-        total_q = 0.0
-        for pid in points_dict.keys():
-          cnt = staff_counts[str(pid)]
-          q = (
-              float(math.ceil(cnt * q_per))
-              if unit == "шт"
-              else round(cnt * q_per, 2)
-          )
-          pts_q[str(pid)] = q
-          total_q += q
-        staff_consumption[prod_name] = {
-            "unit": unit,
-            "points_qty": pts_q,
-            "total": (
-                float(math.ceil(total_q))
-                if unit == "шт"
-                else round(total_q, 2)
-            ),
-        }
+        children_consumption = {}
+        staff_consumption = {}
+        if menu_num is not None:
+            menu_ch = load_menu_from_excel(menu_num)
+            for prod_name, pdata in menu_ch.items():
+                unit = pdata.get("unit", "кг")
+                q_per = pdata.get("qty_per_child", 0.0)
+                pts_q = {}
+                total_q = 0.0
+                for pid in points_dict.keys():
+                    cnt = children_counts[str(pid)]
+                    q = float(math.ceil(cnt * q_per)) if unit == "шт" else round(cnt * q_per, 2)
+                    pts_q[str(pid)] = q
+                    total_q += q
+                children_consumption[prod_name] = {
+                    "unit": unit,
+                    "points_qty": pts_q,
+                    "total": float(math.ceil(total_q)) if unit == "шт" else round(total_q, 2)
+                }
 
-    days_snapshot[d_str] = {
-        "menu_num": menu_num,
-        "children_counts": children_counts,
-        "staff_counts": staff_counts,
-        "children_consumption": children_consumption,
-        "staff_consumption": staff_consumption,
+            menu_st = load_staff_menu_from_excel(menu_num)
+            for prod_name, pdata in menu_st.items():
+                unit = pdata.get("unit", "кг")
+                q_per = pdata.get("qty_per_staff", 0.0)
+                pts_q = {}
+                total_q = 0.0
+                for pid in points_dict.keys():
+                    cnt = staff_counts[str(pid)]
+                    q = float(math.ceil(cnt * q_per)) if unit == "шт" else round(cnt * q_per, 2)
+                    pts_q[str(pid)] = q
+                    total_q += q
+                staff_consumption[prod_name] = {
+                    "unit": unit,
+                    "points_qty": pts_q,
+                    "total": float(math.ceil(total_q)) if unit == "шт" else round(total_q, 2)
+                }
+
+        days_snapshot[d_str] = {
+            "menu_num": menu_num,
+            "children_counts": children_counts,
+            "staff_counts": staff_counts,
+            "children_consumption": children_consumption,
+            "staff_consumption": staff_consumption
+        }
+        curr += timedelta(days=1)
+
+    closed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    snapshot_payload = {
+        "month": month,
+        "region": region,
+        "closed_at": closed_at,
+        "days": days_snapshot
     }
-    curr += timedelta(days=1)
 
-  closed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-  snapshot_payload = {
-      "month": month,
-      "region": region,
-      "closed_at": closed_at,
-      "days": days_snapshot,
-  }
-
-  conn = get_db_connection()
-  cursor = conn.cursor()
-  json_val = json.dumps(snapshot_payload, ensure_ascii=False)
-  if _is_postgres(conn):
-    cursor.execute(
-        """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    json_val = json.dumps(snapshot_payload, ensure_ascii=False)
+    if _is_postgres(conn):
+        cursor.execute("""
             INSERT INTO closed_months (month_str, region, closed_at, snapshot)
             VALUES (%s, %s, %s, %s)
             ON CONFLICT (month_str, region) DO NOTHING;
-        """,
-        (month, region, closed_at, json_val),
-    )
-  else:
-    cursor.execute(
-        """
+        """, (month, region, closed_at, json_val))
+    else:
+        cursor.execute("""
             INSERT INTO closed_months (month_str, region, closed_at, snapshot)
             VALUES (?, ?, ?, ?)
             ON CONFLICT (month_str, region) DO NOTHING;
-        """,
-        (month, region, closed_at, json_val),
-    )
-  conn.commit()
-  cursor.close()
-  conn.close()
+        """, (month, region, closed_at, json_val))
+    conn.commit()
+    cursor.close()
+    conn.close()
 
-  return {
-      "month": month,
-      "region": region,
-      "closed_at": closed_at,
-      "days_count": len(days_snapshot),
-  }
+    return {
+        "month": month,
+        "region": region,
+        "closed_at": closed_at,
+        "days_count": len(days_snapshot)
+    }
 
 
-def generate_menu_pdf_for_point(
-    report_date_str: str,
-    region: str,
-    point_id: int,
-    point_name: str,
-    children_count: int,
-    menu_num: int,
-) -> str:
-  template_path = "Menu shablon.xlsx"
-  if not os.path.exists(template_path):
-    raise FileNotFoundError("Шаблон Menu shablon.xlsx не найден")
+def generate_menu_pdf_for_point(report_date_str: str, region: str, point_id: int, point_name: str, children_count: int, menu_num: int) -> str:
+    template_path = "Menu shablon.xlsx"
+    if not os.path.exists(template_path):
+        raise FileNotFoundError("Шаблон Menu shablon.xlsx не найден")
 
-  try:
-    d_obj = date.fromisoformat(report_date_str)
-    formatted_date = d_obj.strftime("%d.%m.%Y")
-  except Exception:
-    formatted_date = report_date_str
+    try:
+        d_obj = date.fromisoformat(report_date_str)
+        formatted_date = d_obj.strftime("%d.%m.%Y")
+    except Exception:
+        formatted_date = report_date_str
 
-  wb = openpyxl.load_workbook(template_path)
-  target_sheet_name = str(menu_num)
+    wb = openpyxl.load_workbook(template_path)
+    target_sheet_name = str(menu_num)
 
-  if target_sheet_name not in wb.sheetnames:
-    raise ValueError(f"Лист меню {target_sheet_name} не найден в шаблоне")
+    if target_sheet_name not in wb.sheetnames:
+        raise ValueError(f"Лист меню {target_sheet_name} не найден в шаблоне")
 
-  for sheetname in wb.sheetnames:
-    if sheetname != target_sheet_name:
-      del wb[sheetname]
+    for sheetname in wb.sheetnames:
+        if sheetname != target_sheet_name:
+            del wb[sheetname]
 
-  ws = wb[target_sheet_name]
-  ws["A1"] = formatted_date
-  ws["A4"] = children_count
-  ws["F1"] = point_name
+    ws = wb[target_sheet_name]
+    ws['A1'] = formatted_date
+    ws['A4'] = children_count
+    ws['F1'] = point_name
 
-  ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
-  ws.page_setup.paperSize = ws.PAPERSIZE_A4
-  ws.page_setup.fitToWidth = 1
-  ws.page_setup.fitToHeight = 1
-  ws.sheet_properties.pageSetUpPr.fitToPage = True
-  ws.page_setup.horizontalCentered = True
-  ws.page_setup.verticalCentered = True
-  ws.page_margins.left = 0.4
-  ws.page_margins.right = 0.4
-  ws.page_margins.top = 1.5
-  ws.page_margins.bottom = 0.3
-  ws.page_margins.header = 0.0
-  ws.page_margins.footer = 0.0
+    ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 1
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_setup.horizontalCentered = True
+    ws.page_setup.verticalCentered = True
+    ws.page_margins.left = 0.4
+    ws.page_margins.right = 0.4
+    ws.page_margins.top = 1.5
+    ws.page_margins.bottom = 0.3
+    ws.page_margins.header = 0.0
+    ws.page_margins.footer = 0.0
 
-  temp_excel_path = f"temp_{region}_{point_id}_{report_date_str}.xlsx"
-  final_pdf_path = f"Menu_{point_name}_{report_date_str}.pdf"
+    temp_excel_path = f"temp_{region}_{point_id}_{report_date_str}.xlsx"
+    final_pdf_path = f"Menu_{point_name}_{report_date_str}.pdf"
 
-  wb.save(temp_excel_path)
-  wb.close()
+    wb.save(temp_excel_path)
+    wb.close()
 
-  subprocess.run(
-      [
-          "libreoffice",
-          "--headless",
-          "--convert-to",
-          "pdf",
-          temp_excel_path,
-          "--outdir",
-          ".",
-      ],
-      check=True,
-  )
+    subprocess.run(["libreoffice", "--headless", "--convert-to", "pdf", temp_excel_path, "--outdir", "."], check=True)
 
-  generated_pdf = temp_excel_path.replace(".xlsx", ".pdf")
-  if os.path.exists(generated_pdf):
-    if os.path.exists(final_pdf_path):
-      os.remove(final_pdf_path)
-    os.rename(generated_pdf, final_pdf_path)
-    if os.path.exists(temp_excel_path):
-      os.remove(temp_excel_path)
-    return final_pdf_path
-  return temp_excel_path
+    generated_pdf = temp_excel_path.replace(".xlsx", ".pdf")
+    if os.path.exists(generated_pdf):
+        if os.path.exists(final_pdf_path):
+            os.remove(final_pdf_path)
+        os.rename(generated_pdf, final_pdf_path)
+        if os.path.exists(temp_excel_path):
+            os.remove(temp_excel_path)
+        return final_pdf_path
+    return temp_excel_path
 
 
-def generate_staff_menu_pdf_for_point(
-    report_date_str: str,
-    region: str,
-    point_id: int,
-    point_name: str,
-    staff_count: int,
-    menu_num: int,
-) -> str:
-  template_path = "Menu shablon_staff.xlsx"
-  if not os.path.exists(template_path):
-    raise FileNotFoundError("Шаблон Menu shablon_staff.xlsx не найден")
+def generate_staff_menu_pdf_for_point(report_date_str: str, region: str, point_id: int, point_name: str, staff_count: int, menu_num: int) -> str:
+    template_path = "Menu shablon_staff.xlsx"
+    if not os.path.exists(template_path):
+        raise FileNotFoundError("Шаблон Menu shablon_staff.xlsx не найден")
 
-  try:
-    d_obj = date.fromisoformat(report_date_str)
-    formatted_date = d_obj.strftime("%d.%m.%Y")
-  except Exception:
-    formatted_date = report_date_str
+    try:
+        d_obj = date.fromisoformat(report_date_str)
+        formatted_date = d_obj.strftime("%d.%m.%Y")
+    except Exception:
+        formatted_date = report_date_str
 
-  wb = openpyxl.load_workbook(template_path)
-  target_sheet_name = str(menu_num)
+    wb = openpyxl.load_workbook(template_path)
+    target_sheet_name = str(menu_num)
 
-  if target_sheet_name not in wb.sheetnames:
-    raise ValueError(f"Лист меню {target_sheet_name} не найден в шаблоне сотрудников")
+    if target_sheet_name not in wb.sheetnames:
+        raise ValueError(f"Лист меню {target_sheet_name} не найден в шаблоне сотрудников")
 
-  for sheetname in wb.sheetnames:
-    if sheetname != target_sheet_name:
-      del wb[sheetname]
+    for sheetname in wb.sheetnames:
+        if sheetname != target_sheet_name:
+            del wb[sheetname]
 
-  ws = wb[target_sheet_name]
-  ws["A1"] = formatted_date
-  ws["A4"] = staff_count
-  ws["F1"] = point_name
+    ws = wb[target_sheet_name]
+    ws['A1'] = formatted_date
+    ws['A4'] = staff_count
+    ws['F1'] = point_name
 
-  ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
-  ws.page_setup.paperSize = ws.PAPERSIZE_A4
-  ws.page_setup.fitToWidth = 1
-  ws.page_setup.fitToHeight = 1
-  ws.sheet_properties.pageSetUpPr.fitToPage = True
-  ws.page_setup.horizontalCentered = True
-  ws.page_setup.verticalCentered = True
-  ws.page_margins.left = 0.4
-  ws.page_margins.right = 0.4
-  ws.page_margins.top = 1.5
-  ws.page_margins.bottom = 0.3
-  ws.page_margins.header = 0.0
-  ws.page_margins.footer = 0.0
+    ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 1
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_setup.horizontalCentered = True
+    ws.page_setup.verticalCentered = True
+    ws.page_margins.left = 0.4
+    ws.page_margins.right = 0.4
+    ws.page_margins.top = 1.5
+    ws.page_margins.bottom = 0.3
+    ws.page_margins.header = 0.0
+    ws.page_margins.footer = 0.0
 
-  temp_excel_path = f"temp_staff_{region}_{point_id}_{report_date_str}.xlsx"
-  final_pdf_path = f"Menu_Staff_{point_name}_{report_date_str}.pdf"
+    temp_excel_path = f"temp_staff_{region}_{point_id}_{report_date_str}.xlsx"
+    final_pdf_path = f"Menu_Staff_{point_name}_{report_date_str}.pdf"
 
-  wb.save(temp_excel_path)
-  wb.close()
+    wb.save(temp_excel_path)
+    wb.close()
 
-  subprocess.run(
-      [
-          "libreoffice",
-          "--headless",
-          "--convert-to",
-          "pdf",
-          temp_excel_path,
-          "--outdir",
-          ".",
-      ],
-      check=True,
-  )
+    subprocess.run(["libreoffice", "--headless", "--convert-to", "pdf", temp_excel_path, "--outdir", "."], check=True)
 
-  generated_pdf = temp_excel_path.replace(".xlsx", ".pdf")
-  if os.path.exists(generated_pdf):
-    if os.path.exists(final_pdf_path):
-      os.remove(final_pdf_path)
-    os.rename(generated_pdf, final_pdf_path)
-    if os.path.exists(temp_excel_path):
-      os.remove(temp_excel_path)
-    return final_pdf_path
-  return temp_excel_path
+    generated_pdf = temp_excel_path.replace(".xlsx", ".pdf")
+    if os.path.exists(generated_pdf):
+        if os.path.exists(final_pdf_path):
+            os.remove(final_pdf_path)
+        os.rename(generated_pdf, final_pdf_path)
+        if os.path.exists(temp_excel_path):
+            os.remove(temp_excel_path)
+        return final_pdf_path
+    return temp_excel_path
 
 
 def send_pdf_to_telegram(pdf_path: str, caption: str):
-  target_chat_id = TELEGRAM_ADMIN_CHAT_ID or TELEGRAM_CHAT_ID
-  if not TELEGRAM_BOT_TOKEN or not target_chat_id:
-    print("❌ ОШИБКА: Не задан TELEGRAM_BOT_TOKEN или TELEGRAM_ADMIN_CHAT_ID")
-    return None
+    target_chat_id = TELEGRAM_ADMIN_CHAT_ID or TELEGRAM_CHAT_ID
+    if not TELEGRAM_BOT_TOKEN or not target_chat_id:
+        print("❌ ОШИБКА: Не задан TELEGRAM_BOT_TOKEN или TELEGRAM_ADMIN_CHAT_ID")
+        return None
 
-  url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
-  try:
-    with open(pdf_path, "rb") as f:
-      files = {"document": f}
-      data = {"chat_id": target_chat_id, "caption": caption}
-      response = requests.post(url, data=data, files=files)
-    res_json = response.json()
-    if not res_json.get("ok"):
-      print(f"❌ ОШИБКА от Telegram API для файла {pdf_path}: {res_json}")
-    else:
-      print(f"✅ Успешно отправлено в Telegram: {pdf_path}")
-    return res_json
-  except Exception as e:
-    print(f"❌ Исключение при отправке в Telegram файла {pdf_path}: {e}")
-    return None
-
-
-async def process_and_send_menu_in_background(
-    report_date: str, region: str, saved_fact: dict, menu_num: int
-):
-  points_dict = load_points_from_excel(region)
-  for pid, pinfo in points_dict.items():
-    child_cnt = saved_fact.get(str(pid), saved_fact.get(pid))
-    if child_cnt is None:
-      continue
-    p_name = pinfo["name"]
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
     try:
-      pdf_file = generate_menu_pdf_for_point(
-          report_date_str=report_date,
-          region=region,
-          point_id=pid,
-          point_name=p_name,
-          children_count=int(child_cnt),
-          menu_num=menu_num,
-      )
-      caption = (
-          f"📋 Официальное меню № {menu_num} для {p_name} ({region})\n📅 Дата:"
-          f" {report_date}\n👶 Детей: {child_cnt}"
-      )
-      send_pdf_to_telegram(pdf_file, caption)
-      if pdf_file and os.path.exists(pdf_file):
-        os.remove(pdf_file)
-      await asyncio.sleep(2)
+        with open(pdf_path, "rb") as f:
+            files = {"document": f}
+            data = {"chat_id": target_chat_id, "caption": caption}
+            response = requests.post(url, data=data, files=files)
+        res_json = response.json()
+        if not res_json.get("ok"):
+            print(f"❌ ОШИБКА от Telegram API для файла {pdf_path}: {res_json}")
+        else:
+            print(f"✅ Успешно отправлено в Telegram: {pdf_path}")
+        return res_json
     except Exception as e:
-      print(f"❌ Ошибка при обработке точки {p_name}: {e}")
+        print(f"❌ Исключение при отправке в Telegram файла {pdf_path}: {e}")
+        return None
 
 
-async def process_and_send_staff_menu_in_background(
-    report_date: str, region: str, saved_fact: dict, menu_num: int
-):
-  points_dict = load_points_from_excel(region)
-  for pid, pinfo in points_dict.items():
-    staff_cnt = saved_fact.get(str(pid), saved_fact.get(pid))
-    if staff_cnt is None or int(staff_cnt) <= 0:
-      continue
-    p_name = pinfo["name"]
-    try:
-      pdf_file = generate_staff_menu_pdf_for_point(
-          report_date_str=report_date,
-          region=region,
-          point_id=pid,
-          point_name=p_name,
-          staff_count=int(staff_cnt),
-          menu_num=menu_num,
-      )
-      caption = (
-          f"📋 Меню сотрудников № {menu_num} для {p_name} ({region})\n📅 Дата:"
-          f" {report_date}\n👥 Сотрудников: {staff_cnt}"
-      )
-      send_pdf_to_telegram(pdf_file, caption)
-      if pdf_file and os.path.exists(pdf_file):
-        os.remove(pdf_file)
-      await asyncio.sleep(2)
-    except Exception as e:
-      print(f"❌ Ошибка при обработке точки сотрудников {p_name}: {e}")
+async def process_and_send_menu_in_background(report_date: str, region: str, saved_fact: dict, menu_num: int):
+    points_dict = load_points_from_excel(region)
+    for pid, pinfo in points_dict.items():
+        child_cnt = saved_fact.get(str(pid), saved_fact.get(pid))
+        if child_cnt is None:
+            continue
+        p_name = pinfo["name"]
+        try:
+            pdf_file = generate_menu_pdf_for_point(
+                report_date_str=report_date,
+                region=region,
+                point_id=pid,
+                point_name=p_name,
+                children_count=int(child_cnt),
+                menu_num=menu_num
+            )
+            caption = f"📋 Официальное меню № {menu_num} для {p_name} ({region})\n📅 Дата: {report_date}\n👶 Детей: {child_cnt}"
+            send_pdf_to_telegram(pdf_file, caption)
+            if pdf_file and os.path.exists(pdf_file):
+                os.remove(pdf_file)
+            await asyncio.sleep(2)
+        except Exception as e:
+            print(f"❌ Ошибка при обработке точки {p_name}: {e}")
+
+
+async def process_and_send_staff_menu_in_background(report_date: str, region: str, saved_fact: dict, menu_num: int):
+    points_dict = load_points_from_excel(region)
+    for pid, pinfo in points_dict.items():
+        staff_cnt = saved_fact.get(str(pid), saved_fact.get(pid))
+        if staff_cnt is None or int(staff_cnt) <= 0:
+            continue
+        p_name = pinfo["name"]
+        try:
+            pdf_file = generate_staff_menu_pdf_for_point(
+                report_date_str=report_date,
+                region=region,
+                point_id=pid,
+                point_name=p_name,
+                staff_count=int(staff_cnt),
+                menu_num=menu_num
+            )
+            caption = f"📋 Меню сотрудников № {menu_num} для {p_name} ({region})\n📅 Дата: {report_date}\n👥 Сотрудников: {staff_cnt}"
+            send_pdf_to_telegram(pdf_file, caption)
+            if pdf_file and os.path.exists(pdf_file):
+                os.remove(pdf_file)
+            await asyncio.sleep(2)
+        except Exception as e:
+            print(f"❌ Ошибка при обработке точки сотрудников {p_name}: {e}")
 
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 def get_dashboard():
-  html_content = """
+    html_content = """
     <!DOCTYPE html>
     <html lang="ru">
     <head>
@@ -2019,7 +1861,7 @@ def get_dashboard():
                 const container = document.getElementById('stockMatrixContainer');
                 container.innerHTML = '<div class="text-center py-12 text-gray-500">Загрузка акта инвентаризации...</div>';
 
-                const res = await fetch(`/api/stock/matrix/${region}?date=${dateVal}`);
+                const res = await fetch(`/api/stock/matrix/${region}?inv_date=${dateVal}`);
                 const data = await res.json();
                 let html = `
                     <table class="min-w-full divide-y divide-gray-200 text-xs border-collapse">
@@ -2090,7 +1932,7 @@ def get_dashboard():
 
             async function deleteStockDate(dStr, region) {
                 if (!confirm(`Точно удалить акт инвентаризации за ${dStr} (${region})?`)) return;
-                const res = await fetch(`/api/stock/matrix/${region}?date=${dStr}`, { method: 'DELETE' });
+                const res = await fetch(`/api/stock/matrix/${region}?inv_date=${dStr}`, { method: 'DELETE' });
                 if (res.ok) loadStockMatrix();
                 else alert('Ошибка при удалении акта.');
             }
@@ -2108,7 +1950,7 @@ def get_dashboard():
                     stockPayload[pid][prod] = val;
                 });
 
-                const res = await fetch(`/api/stock/matrix/${region}?date=${dateVal}`, {
+                const res = await fetch(`/api/stock/matrix/${region}?inv_date=${dateVal}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(stockPayload)
@@ -2123,7 +1965,7 @@ def get_dashboard():
                 const dateVal = document.getElementById('stockDate').value;
                 const region = document.getElementById('stockRegionSelect').value;
                 if (!dateVal) { alert('Выберите дату инвентаризации'); return; }
-                window.location.href = `/api/stock/export/excel?date=${dateVal}&region=${region}`;
+                window.location.href = `/api/stock/export/excel?inv_date=${dateVal}&region=${region}`;
             }
 
             async function checkCloseMonthStatus() {
@@ -2338,1752 +2180,1380 @@ def get_dashboard():
     </body>
     </html>
     """
-  return HTMLResponse(content=html_content)
-
-
-# --- API ЗАКРЫТИЯ МЕСЯЦА ---
+    return HTMLResponse(content=html_content)
 
 
 @app.get("/api/month-close/status")
 def get_month_close_status_api(month: str, region: str = "Город"):
-  snap = get_closed_month_snapshot(month, region)
-  return {
-      "month": month,
-      "region": region,
-      "is_closed": snap is not None,
-      "closed_at": snap.get("closed_at") if snap else None,
-      "days_count": len(snap.get("days", {})) if snap else 0,
-  }
+    snap = get_closed_month_snapshot(month, region)
+    return {
+        "month": month,
+        "region": region,
+        "is_closed": snap is not None,
+        "closed_at": snap.get("closed_at") if snap else None,
+        "days_count": len(snap.get("days", {})) if snap else 0
+    }
 
 
 @app.get("/api/month-close/list")
 def list_closed_months_api():
-  try:
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT month_str, region, closed_at FROM closed_months ORDER BY"
-        " month_str DESC, region ASC;"
-    )
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    return [
-        {
-            "month": r["month_str"],
-            "region": r["region"],
-            "closed_at": r["closed_at"],
-        }
-        for r in rows
-    ]
-  except Exception as e:
-    print(f"Ошибка загрузки списка закрытых месяцев: {e}")
-    return []
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT month_str, region, closed_at FROM closed_months ORDER BY month_str DESC, region ASC;")
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return [{"month": r["month_str"], "region": r["region"], "closed_at": r["closed_at"]} for r in rows]
+    except Exception as e:
+        print(f"Ошибка загрузки списка закрытых месяцев: {e}")
+        return []
 
 
 @app.post("/api/month-close/close")
 def close_month_api(req: CloseMonthRequest):
-  if req.password != MONTH_CLOSE_PASSWORD:
-    raise HTTPException(status_code=403, detail="Неверный пароль закрытия месяца")
+    if req.password != MONTH_CLOSE_PASSWORD:
+        raise HTTPException(status_code=403, detail="Неверный пароль закрытия месяца")
 
-  if req.region == "Оба":
-    results = [
-        _close_single_month(req.month, "Город"),
-        _close_single_month(req.month, "Район"),
-    ]
+    if req.region == "Оба":
+        results = [_close_single_month(req.month, "Город"), _close_single_month(req.month, "Район")]
+        return {
+            "status": "closed",
+            "month": req.month,
+            "regions": results,
+            "message": f"Месяц {req.month} закрыт и заморожен по обоим регионам (Город и Район)."
+        }
+
+    res = _close_single_month(req.month, req.region)
     return {
         "status": "closed",
         "month": req.month,
-        "regions": results,
-        "message": (
-            f"Месяц {req.month} закрыт и заморожен по обоим регионам (Город и"
-            " Район)."
-        ),
+        "region": req.region,
+        "closed_at": res["closed_at"],
+        "message": f"Месяц {req.month} ({req.region}) закрыт и заморожен навсегда."
     }
-
-  res = _close_single_month(req.month, req.region)
-  return {
-      "status": "closed",
-      "month": req.month,
-      "region": req.region,
-      "closed_at": res["closed_at"],
-      "message": (
-          f"Месяц {req.month} ({req.region}) закрыт и заморожен навсегда."
-      ),
-  }
-
-
-# --- ФАКТ ДЕТИ ---
 
 
 @app.get("/api/fact/report")
 def get_fact_report(report_date: str, region: str = "Город"):
-  try:
-    parsed_date = date.fromisoformat(report_date)
-  except Exception:
-    parsed_date = date.today()
+    try:
+        parsed_date = date.fromisoformat(report_date)
+    except Exception:
+        parsed_date = date.today()
 
-  points_dict = load_points_from_excel(region)
-  closed_day = get_closed_day_snapshot(report_date, region)
+    points_dict = load_points_from_excel(region)
+    closed_day = get_closed_day_snapshot(report_date, region)
 
-  if closed_day is not None:
-    snap_ch = closed_day.get("children_counts", {})
-    points_list = []
-    fact_children_out = {}
-    for pid, pinfo in points_dict.items():
-      c_cnt = _safe_int_or_zero(snap_ch.get(str(pid), snap_ch.get(pid, 0)))
-      fact_children_out[str(pid)] = c_cnt
-      points_list.append({
-          "id": pid,
-          "name": pinfo["name"],
-          "default_children": c_cnt,
-          "plan_children": pinfo["children_count"],
-      })
+    if closed_day is not None:
+        snap_ch = closed_day.get("children_counts", {})
+        points_list = []
+        fact_children_out = {}
+        for pid, pinfo in points_dict.items():
+            c_cnt = _safe_int_or_zero(snap_ch.get(str(pid), snap_ch.get(pid, 0)))
+            fact_children_out[str(pid)] = c_cnt
+            points_list.append({
+                "id": pid,
+                "name": pinfo["name"],
+                "default_children": c_cnt,
+                "plan_children": pinfo["children_count"]
+            })
 
-    menu_num = closed_day.get("menu_num")
-    fact_consumption = {}
-    snap_cons = closed_day.get("children_consumption", {})
-    if menu_num is not None:
-      for prod_name, pdata in snap_cons.items():
-        pts_q = {}
-        for pid in points_dict.keys():
-          pts_q[pid] = pdata.get("points_qty", {}).get(
-              str(pid), pdata.get("points_qty", {}).get(pid, 0.0)
-          )
-        fact_consumption[prod_name] = {
-            "unit": pdata.get("unit", "кг"),
-            "points_qty": pts_q,
-            "total_fact": pdata.get("total", 0.0),
+        menu_num = closed_day.get("menu_num")
+        fact_consumption = {}
+        snap_cons = closed_day.get("children_consumption", {})
+        if menu_num is not None:
+            for prod_name, pdata in snap_cons.items():
+                pts_q = {}
+                for pid in points_dict.keys():
+                    pts_q[pid] = pdata.get("points_qty", {}).get(str(pid), pdata.get("points_qty", {}).get(pid, 0.0))
+                fact_consumption[prod_name] = {
+                    "unit": pdata.get("unit", "кг"),
+                    "points_qty": pts_q,
+                    "total_fact": pdata.get("total", 0.0)
+                }
+        return {
+            "date": report_date,
+            "region": region,
+            "menu_num": menu_num,
+            "is_closed": True,
+            "points": points_list,
+            "fact_children": fact_children_out,
+            "fact_consumption": fact_consumption
         }
+
+    fact_storage = load_fact_children_settings()
+    saved_fact_children = fact_storage.get(report_date, {}).get(region, {})
+
+    points_list = []
+    for pid, pinfo in points_dict.items():
+        child_cnt = saved_fact_children.get(str(pid))
+        if child_cnt is None:
+            child_cnt = saved_fact_children.get(pid, 0)
+        else:
+            child_cnt = int(child_cnt)
+
+        points_list.append({
+            "id": pid,
+            "name": pinfo["name"],
+            "default_children": child_cnt,
+            "plan_children": pinfo["children_count"]
+        })
+
+    menu_num = get_menu_number_for_date_custom(parsed_date)
+    fact_consumption = {}
+
+    if menu_num is not None:
+        menu_items = load_menu_from_excel(menu_num)
+        for prod_name, pdata in menu_items.items():
+            kg_per_child = pdata.get("qty_per_child", 0.0)
+            unit = pdata.get("unit", "кг")
+            points_qty = {}
+            row_sum = 0.0
+            for p in points_list:
+                pid = p["id"]
+                child_cnt = p["default_children"]
+                qty = math.ceil(child_cnt * kg_per_child) if unit == "шт" else round(child_cnt * kg_per_child, 2)
+                points_qty[pid] = qty
+                row_sum += qty
+
+            fact_consumption[prod_name] = {
+                "unit": unit,
+                "points_qty": points_qty,
+                "total_fact": math.ceil(row_sum) if unit == "шт" else round(row_sum, 2)
+            }
     return {
         "date": report_date,
         "region": region,
         "menu_num": menu_num,
-        "is_closed": True,
+        "is_closed": False,
         "points": points_list,
-        "fact_children": fact_children_out,
-        "fact_consumption": fact_consumption,
+        "fact_children": saved_fact_children,
+        "fact_consumption": fact_consumption
     }
-
-  fact_storage = load_fact_children_settings()
-  saved_fact_children = fact_storage.get(report_date, {}).get(region, {})
-
-  points_list = []
-  for pid, pinfo in points_dict.items():
-    child_cnt = saved_fact_children.get(str(pid))
-    if child_cnt is None:
-      child_cnt = saved_fact_children.get(pid, 0)
-    else:
-      child_cnt = int(child_cnt)
-
-    points_list.append({
-        "id": pid,
-        "name": pinfo["name"],
-        "default_children": child_cnt,
-        "plan_children": pinfo["children_count"],
-    })
-
-  menu_num = get_menu_number_for_date_custom(parsed_date)
-  fact_consumption = {}
-
-  if menu_num is not None:
-    menu_items = load_menu_from_excel(menu_num)
-    for prod_name, pdata in menu_items.items():
-      kg_per_child = pdata.get("qty_per_child", 0.0)
-      unit = pdata.get("unit", "кг")
-      points_qty = {}
-      row_sum = 0.0
-      for p in points_list:
-        pid = p["id"]
-        child_cnt = p["default_children"]
-        qty = (
-            math.ceil(child_cnt * kg_per_child)
-            if unit == "шт"
-            else round(child_cnt * kg_per_child, 2)
-        )
-        points_qty[pid] = qty
-        row_sum += qty
-
-      fact_consumption[prod_name] = {
-          "unit": unit,
-          "points_qty": points_qty,
-          "total_fact": math.ceil(row_sum) if unit == "шт" else round(row_sum, 2),
-      }
-  return {
-      "date": report_date,
-      "region": region,
-      "menu_num": menu_num,
-      "is_closed": False,
-      "points": points_list,
-      "fact_children": saved_fact_children,
-      "fact_consumption": fact_consumption,
-  }
-
-
-# --- ФАКТ СОТРУДНИКИ ---
 
 
 @app.get("/api/fact-staff/report")
 def get_fact_staff_report(report_date: str, region: str = "Город"):
-  try:
-    parsed_date = date.fromisoformat(report_date)
-  except Exception:
-    parsed_date = date.today()
+    try:
+        parsed_date = date.fromisoformat(report_date)
+    except Exception:
+        parsed_date = date.today()
 
-  points_dict = load_points_from_excel(region)
-  closed_day = get_closed_day_snapshot(report_date, region)
+    points_dict = load_points_from_excel(region)
+    closed_day = get_closed_day_snapshot(report_date, region)
 
-  if closed_day is not None:
-    snap_st = closed_day.get("staff_counts", {})
-    points_list = []
-    fact_staff_out = {}
-    for pid, pinfo in points_dict.items():
-      s_cnt = _safe_int_or_zero(snap_st.get(str(pid), snap_st.get(pid, 0)))
-      fact_staff_out[str(pid)] = s_cnt
-      points_list.append({
-          "id": pid,
-          "name": pinfo["name"],
-          "default_staff": s_cnt,
-      })
+    if closed_day is not None:
+        snap_st = closed_day.get("staff_counts", {})
+        points_list = []
+        fact_staff_out = {}
+        for pid, pinfo in points_dict.items():
+            s_cnt = _safe_int_or_zero(snap_st.get(str(pid), snap_st.get(pid, 0)))
+            fact_staff_out[str(pid)] = s_cnt
+            points_list.append({
+                "id": pid,
+                "name": pinfo["name"],
+                "default_staff": s_cnt
+            })
 
-    menu_num = closed_day.get("menu_num")
-    fact_consumption = {}
-    snap_cons = closed_day.get("staff_consumption", {})
-    if menu_num is not None:
-      for prod_name, pdata in snap_cons.items():
-        pts_q = {}
-        for pid in points_dict.keys():
-          pts_q[pid] = pdata.get("points_qty", {}).get(
-              str(pid), pdata.get("points_qty", {}).get(pid, 0.0)
-          )
-        fact_consumption[prod_name] = {
-            "unit": pdata.get("unit", "кг"),
-            "points_qty": pts_q,
-            "total_fact": pdata.get("total", 0.0),
+        menu_num = closed_day.get("menu_num")
+        fact_consumption = {}
+        snap_cons = closed_day.get("staff_consumption", {})
+        if menu_num is not None:
+            for prod_name, pdata in snap_cons.items():
+                pts_q = {}
+                for pid in points_dict.keys():
+                    pts_q[pid] = pdata.get("points_qty", {}).get(str(pid), pdata.get("points_qty", {}).get(pid, 0.0))
+                fact_consumption[prod_name] = {
+                    "unit": pdata.get("unit", "кг"),
+                    "points_qty": pts_q,
+                    "total_fact": pdata.get("total", 0.0)
+                }
+        return {
+            "date": report_date,
+            "region": region,
+            "menu_num": menu_num,
+            "is_closed": True,
+            "points": points_list,
+            "fact_staff": fact_staff_out,
+            "fact_consumption": fact_consumption
         }
+
+    fact_storage = load_fact_staff_settings()
+    saved_fact_staff = fact_storage.get(report_date, {}).get(region, {})
+
+    points_list = []
+    for pid, pinfo in points_dict.items():
+        staff_cnt = saved_fact_staff.get(str(pid))
+        if staff_cnt is None:
+            staff_cnt = saved_fact_staff.get(pid, 0)
+        else:
+            staff_cnt = int(staff_cnt)
+
+        points_list.append({
+            "id": pid,
+            "name": pinfo["name"],
+            "default_staff": staff_cnt
+        })
+
+    menu_num = get_menu_number_for_date_custom(parsed_date)
+    fact_consumption = {}
+
+    if menu_num is not None:
+        menu_items = load_staff_menu_from_excel(menu_num)
+        for prod_name, pdata in menu_items.items():
+            kg_per_staff = pdata.get("qty_per_staff", 0.0)
+            unit = pdata.get("unit", "кг")
+            points_qty = {}
+            row_sum = 0.0
+            for p in points_list:
+                pid = p["id"]
+                staff_cnt = p["default_staff"]
+                qty = math.ceil(staff_cnt * kg_per_staff) if unit == "шт" else round(staff_cnt * kg_per_staff, 2)
+                points_qty[pid] = qty
+                row_sum += qty
+
+            fact_consumption[prod_name] = {
+                "unit": unit,
+                "points_qty": points_qty,
+                "total_fact": math.ceil(row_sum) if unit == "шт" else round(row_sum, 2)
+            }
     return {
         "date": report_date,
         "region": region,
         "menu_num": menu_num,
-        "is_closed": True,
+        "is_closed": False,
         "points": points_list,
-        "fact_staff": fact_staff_out,
-        "fact_consumption": fact_consumption,
+        "fact_staff": saved_fact_staff,
+        "fact_consumption": fact_consumption
     }
-
-  fact_storage = load_fact_staff_settings()
-  saved_fact_staff = fact_storage.get(report_date, {}).get(region, {})
-
-  points_list = []
-  for pid, pinfo in points_dict.items():
-    staff_cnt = saved_fact_staff.get(str(pid))
-    if staff_cnt is None:
-      staff_cnt = saved_fact_staff.get(pid, 0)
-    else:
-      staff_cnt = int(staff_cnt)
-
-    points_list.append({
-        "id": pid,
-        "name": pinfo["name"],
-        "default_staff": staff_cnt,
-    })
-
-  menu_num = get_menu_number_for_date_custom(parsed_date)
-  fact_consumption = {}
-
-  if menu_num is not None:
-    menu_items = load_staff_menu_from_excel(menu_num)
-    for prod_name, pdata in menu_items.items():
-      kg_per_staff = pdata.get("qty_per_staff", 0.0)
-      unit = pdata.get("unit", "кг")
-      points_qty = {}
-      row_sum = 0.0
-      for p in points_list:
-        pid = p["id"]
-        staff_cnt = p["default_staff"]
-        qty = (
-            math.ceil(staff_cnt * kg_per_staff)
-            if unit == "шт"
-            else round(staff_cnt * kg_per_staff, 2)
-        )
-        points_qty[pid] = qty
-        row_sum += qty
-
-      fact_consumption[prod_name] = {
-          "unit": unit,
-          "points_qty": points_qty,
-          "total_fact": math.ceil(row_sum) if unit == "шт" else round(row_sum, 2),
-      }
-  return {
-      "date": report_date,
-      "region": region,
-      "menu_num": menu_num,
-      "is_closed": False,
-      "points": points_list,
-      "fact_staff": saved_fact_staff,
-      "fact_consumption": fact_consumption,
-  }
 
 
 @app.get("/api/fact/saved-days")
 def get_saved_days_list(region: str = "Город"):
-  storage = load_fact_children_settings()
-  saved_dates = []
-  for d_str, regions_data in storage.items():
-    if regions_data and region in regions_data and regions_data[region]:
-      saved_dates.append({"date": d_str, "is_closed": is_month_closed(d_str, region)})
-  return sorted(saved_dates, key=lambda x: x["date"], reverse=True)
+    storage = load_fact_children_settings()
+    saved_dates = []
+    for d_str, regions_data in storage.items():
+        if regions_data and region in regions_data and regions_data[region]:
+            saved_dates.append({"date": d_str, "is_closed": is_month_closed(d_str, region)})
+    return sorted(saved_dates, key=lambda x: x["date"], reverse=True)
 
 
 @app.get("/api/fact-staff/saved-days")
 def get_saved_staff_days_list(region: str = "Город"):
-  storage = load_fact_staff_settings()
-  saved_dates = []
-  for d_str, regions_data in storage.items():
-    if regions_data and region in regions_data and regions_data[region]:
-      saved_dates.append({"date": d_str, "is_closed": is_month_closed(d_str, region)})
-  return sorted(saved_dates, key=lambda x: x["date"], reverse=True)
+    storage = load_fact_staff_settings()
+    saved_dates = []
+    for d_str, regions_data in storage.items():
+        if regions_data and region in regions_data and regions_data[region]:
+            saved_dates.append({"date": d_str, "is_closed": is_month_closed(d_str, region)})
+    return sorted(saved_dates, key=lambda x: x["date"], reverse=True)
 
 
 @app.get("/api/stock/saved-days")
 def get_saved_stock_days_list(region: str = "Город"):
-  storage = load_stock_settings()
-  saved_dates = []
-  for d_str, regions_data in storage.items():
-    if regions_data and region in regions_data and regions_data[region]:
-      saved_dates.append(d_str)
-  return sorted(saved_dates, reverse=True)
-
-
-# --- ОСТАТКИ ---
+    storage = load_stock_settings()
+    saved_dates = []
+    for d_str, regions_data in storage.items():
+        if regions_data and region in regions_data and regions_data[region]:
+            saved_dates.append(d_str)
+    return sorted(saved_dates, reverse=True)
 
 
 @app.get("/api/balance/report")
 def get_balance_report(report_date: str, region: str = "Город"):
-  try:
-    parsed_date = date.fromisoformat(report_date)
-  except Exception:
-    parsed_date = date.today()
+    try:
+        parsed_date = date.fromisoformat(report_date)
+    except Exception:
+        parsed_date = date.today()
 
-  points_dict = load_points_from_excel(region)
-  fact_storage = load_fact_children_settings()
-  fact_staff_storage = load_fact_staff_settings()
-  stock_storage = load_stock_settings()
+    points_dict = load_points_from_excel(region)
+    fact_storage = load_fact_children_settings()
+    fact_staff_storage = load_fact_staff_settings()
+    stock_storage = load_stock_settings()
 
-  closed_target_day = get_closed_day_snapshot(report_date, region)
-  saved_fact_children_target = (
-      closed_target_day.get("children_counts", {})
-      if closed_target_day
-      else fact_storage.get(report_date, {}).get(region, {})
-  )
+    closed_target_day = get_closed_day_snapshot(report_date, region)
+    saved_fact_children_target = closed_target_day.get("children_counts", {}) if closed_target_day else fact_storage.get(report_date, {}).get(region, {})
 
-  points_list = []
-  for pid, pinfo in points_dict.items():
-    is_saved = (
-        True
-        if closed_target_day is not None
-        else ((str(pid) in saved_fact_children_target) or (pid in saved_fact_children_target))
-    )
-    if is_saved:
-      c_cnt = int(
-          saved_fact_children_target.get(
-              str(pid), saved_fact_children_target.get(pid, 0)
-          )
-          or 0
-      )
-    else:
-      c_cnt = pinfo["children_count"]
-
-    points_list.append({
-        "id": pid,
-        "name": pinfo["name"],
-        "children_count": c_cnt,
-        "is_saved": is_saved,
-    })
-
-  available_inv_dates = sorted(
-      [d for d in stock_storage.keys() if d <= report_date]
-  )
-  inv_date_used = None
-  initial_stock = {}
-  if available_inv_dates:
-    inv_date_used = available_inv_dates[-1]
-    initial_stock = stock_storage[inv_date_used].get(region, {})
-
-  purchases_storage = load_purchases_settings().get(region, {})
-  purchases_between = {}
-  inv_dt = (
-      date.fromisoformat(inv_date_used) if inv_date_used else date(2000, 1, 1)
-  )
-
-  for pid, p_list in purchases_storage.items():
-    for p in p_list:
-      p_date = p.get("date")
-      if p_date and inv_dt <= date.fromisoformat(p_date) <= parsed_date:
-        if pid not in purchases_between:
-          purchases_between[pid] = {}
-        prod = p.get("product")
-        purchases_between[pid][prod] = (
-            purchases_between[pid].get(prod, 0.0) + p.get("qty", 0.0)
-        )
-
-  consumed_between = {}
-  if inv_date_used:
-    inv_dt_real = date.fromisoformat(inv_date_used)
-    if inv_dt_real <= parsed_date:
-      curr_d = inv_dt_real
-      while curr_d <= parsed_date:
-        d_iso = curr_d.isoformat()
-        closed_snap = get_closed_day_snapshot(d_iso, region)
-        if closed_snap is not None:
-          ch_cons = closed_snap.get("children_consumption", {})
-          for prod_name, pdata in ch_cons.items():
-            for pid in points_dict.keys():
-              if pid not in consumed_between:
-                consumed_between[pid] = {}
-              q_val = float(
-                  pdata.get("points_qty", {}).get(
-                      str(pid), pdata.get("points_qty", {}).get(pid, 0.0)
-                  )
-                  or 0.0
-              )
-              consumed_between[pid][prod_name] = (
-                  consumed_between[pid].get(prod_name, 0.0) + q_val
-              )
-
-          st_cons = closed_snap.get("staff_consumption", {})
-          for prod_name, pdata in st_cons.items():
-            for pid in points_dict.keys():
-              if pid not in consumed_between:
-                consumed_between[pid] = {}
-              q_val = float(
-                  pdata.get("points_qty", {}).get(
-                      str(pid), pdata.get("points_qty", {}).get(pid, 0.0)
-                  )
-                  or 0.0
-              )
-              consumed_between[pid][prod_name] = (
-                  consumed_between[pid].get(prod_name, 0.0) + q_val
-              )
+    points_list = []
+    for pid, pinfo in points_dict.items():
+        is_saved = True if closed_target_day is not None else ((str(pid) in saved_fact_children_target) or (pid in saved_fact_children_target))
+        if is_saved:
+            c_cnt = int(saved_fact_children_target.get(str(pid), saved_fact_children_target.get(pid, 0)) or 0)
         else:
-          m_num = get_menu_number_for_date_custom(curr_d)
-          if m_num is not None:
-            day_menu = load_menu_from_excel(m_num)
-            day_fact_children = fact_storage.get(d_iso, {}).get(region, {})
-            for pid, pinfo in points_dict.items():
-              child_cnt = day_fact_children.get(str(pid))
-              if child_cnt is None:
-                child_cnt = day_fact_children.get(pid, pinfo["children_count"])
-              else:
-                child_cnt = int(child_cnt)
+            c_cnt = pinfo["children_count"]
 
-              if pid not in consumed_between:
-                consumed_between[pid] = {}
-              for prod_name, pdata in day_menu.items():
-                unit_check = pdata.get("unit", "кг")
-                raw_consumption = pdata.get("qty_per_child", 0.0) * child_cnt
-                day_qty = (
-                    math.ceil(raw_consumption)
-                    if unit_check == "шт"
-                    else raw_consumption
-                )
-                consumed_between[pid][prod_name] = (
-                    consumed_between[pid].get(prod_name, 0.0) + day_qty
-                )
+        points_list.append({
+            "id": pid,
+            "name": pinfo["name"],
+            "children_count": c_cnt,
+            "is_saved": is_saved
+        })
 
-            day_staff_menu = load_staff_menu_from_excel(m_num)
-            day_fact_staff = fact_staff_storage.get(d_iso, {}).get(region, {})
-            for pid in points_dict.keys():
-              staff_cnt = day_fact_staff.get(str(pid), day_fact_staff.get(pid, 0))
-              staff_cnt = int(staff_cnt) if staff_cnt is not None else 0
-              if staff_cnt > 0:
-                if pid not in consumed_between:
-                  consumed_between[pid] = {}
-                for prod_name, pdata in day_staff_menu.items():
-                  unit_check = pdata.get("unit", "кг")
-                  raw_consumption = pdata.get("qty_per_staff", 0.0) * staff_cnt
-                  day_qty = (
-                      math.ceil(raw_consumption)
-                      if unit_check == "шт"
-                      else raw_consumption
-                  )
-                  consumed_between[pid][prod_name] = (
-                      consumed_between[pid].get(prod_name, 0.0) + day_qty
-                  )
+    available_inv_dates = sorted([d for d in stock_storage.keys() if d <= report_date])
+    inv_date_used = None
+    initial_stock = {}
+    if available_inv_dates:
+        inv_date_used = available_inv_dates[-1]
+        initial_stock = stock_storage[inv_date_used].get(region, {})
 
-        curr_d += timedelta(days=1)
+    purchases_storage = load_purchases_settings().get(region, {})
+    purchases_between = {}
+    inv_dt = date.fromisoformat(inv_date_used) if inv_date_used else date(2000, 1, 1)
 
-  balance_report = {}
-  all_products_set = set(get_all_products_with_units().keys())
+    for pid, p_list in purchases_storage.items():
+        for p in p_list:
+            p_date = p.get("date")
+            if p_date and inv_dt <= date.fromisoformat(p_date) <= parsed_date:
+                if pid not in purchases_between:
+                    purchases_between[pid] = {}
+                prod = p.get("product")
+                purchases_between[pid][prod] = purchases_between[pid].get(prod, 0.0) + p.get("qty", 0.0)
 
-  for prod_name in sorted(all_products_set):
-    unit = "кг"
-    for i in range(1, 11):
-      m_items = load_menu_from_excel(i)
-      if prod_name in m_items:
-        unit = m_items[prod_name]["unit"]
-        break
+    consumed_between = {}
+    if inv_date_used:
+        inv_dt_real = date.fromisoformat(inv_date_used)
+        if inv_dt_real <= parsed_date:
+            curr_d = inv_dt_real
+            while curr_d <= parsed_date:
+                d_iso = curr_d.isoformat()
+                closed_snap = get_closed_day_snapshot(d_iso, region)
+                if closed_snap is not None:
+                    for prod_name, pdata in closed_snap.get("children_consumption", {}).items():
+                        for pid in points_dict.keys():
+                            if pid not in consumed_between:
+                                consumed_between[pid] = {}
+                            q_val = float(pdata.get("points_qty", {}).get(str(pid), pdata.get("points_qty", {}).get(pid, 0.0)) or 0.0)
+                            consumed_between[pid][prod_name] = consumed_between[pid].get(prod_name, 0.0) + q_val
 
-    points_balance = {}
-    prod_total_balance = 0.0
+                    for prod_name, pdata in closed_snap.get("staff_consumption", {}).items():
+                        for pid in points_dict.keys():
+                            if pid not in consumed_between:
+                                consumed_between[pid] = {}
+                            q_val = float(pdata.get("points_qty", {}).get(str(pid), pdata.get("points_qty", {}).get(pid, 0.0)) or 0.0)
+                            consumed_between[pid][prod_name] = consumed_between[pid].get(prod_name, 0.0) + q_val
+                else:
+                    m_num = get_menu_number_for_date_custom(curr_d)
+                    if m_num is not None:
+                        day_menu = load_menu_from_excel(m_num)
+                        day_fact_children = fact_storage.get(d_iso, {}).get(region, {})
+                        for pid, pinfo in points_dict.items():
+                            child_cnt = day_fact_children.get(str(pid))
+                            if child_cnt is None:
+                                child_cnt = day_fact_children.get(pid, pinfo["children_count"])
+                            else:
+                                child_cnt = int(child_cnt)
 
-    for pid in points_dict.keys():
-      p_init = (
-          initial_stock.get(str(pid), {})
-          if str(pid) in initial_stock
-          else initial_stock.get(pid, {})
-      )
-      init_val = (
-          p_init.get(prod_name, 0.0)
-          if isinstance(p_init, dict)
-          else float(p_init or 0.0)
-      )
+                            if pid not in consumed_between:
+                                consumed_between[pid] = {}
+                            for prod_name, pdata in day_menu.items():
+                                unit_check = pdata.get("unit", "кг")
+                                raw_consumption = pdata.get("qty_per_child", 0.0) * child_cnt
+                                day_qty = math.ceil(raw_consumption) if unit_check == "шт" else raw_consumption
+                                consumed_between[pid][prod_name] = consumed_between[pid].get(prod_name, 0.0) + day_qty
 
-      p_purch = purchases_between.get(pid, {})
-      purch_val = (
-          p_purch.get(prod_name, 0.0)
-          if isinstance(p_purch, dict)
-          else float(p_purch or 0.0)
-      )
+                        day_staff_menu = load_staff_menu_from_excel(m_num)
+                        day_fact_staff = fact_staff_storage.get(d_iso, {}).get(region, {})
+                        for pid in points_dict.keys():
+                            staff_cnt = day_fact_staff.get(str(pid), day_fact_staff.get(pid, 0))
+                            staff_cnt = int(staff_cnt) if staff_cnt is not None else 0
+                            if staff_cnt > 0:
+                                if pid not in consumed_between:
+                                    consumed_between[pid] = {}
+                                for prod_name, pdata in day_staff_menu.items():
+                                    unit_check = pdata.get("unit", "кг")
+                                    raw_consumption = pdata.get("qty_per_staff", 0.0) * staff_cnt
+                                    day_qty = math.ceil(raw_consumption) if unit_check == "шт" else raw_consumption
+                                    consumed_between[pid][prod_name] = consumed_between[pid].get(prod_name, 0.0) + day_qty
 
-      p_cons = consumed_between.get(pid, {})
-      cons_val = (
-          p_cons.get(prod_name, 0.0)
-          if isinstance(p_cons, dict)
-          else float(p_cons or 0.0)
-      )
+                curr_d += timedelta(days=1)
 
-      bal = (init_val + purch_val) - cons_val
-      bal_rounded = float(math.ceil(bal)) if unit == "шт" else round(bal, 2)
+    balance_report = {}
+    all_products_set = set(get_all_products_with_units().keys())
 
-      points_balance[pid] = bal_rounded
-      prod_total_balance += bal_rounded
+    for prod_name in sorted(all_products_set):
+        unit = "кг"
+        for i in range(1, 11):
+            m_items = load_menu_from_excel(i)
+            if prod_name in m_items:
+                unit = m_items[prod_name]["unit"]
+                break
 
-    balance_report[prod_name] = {
-        "unit": unit,
-        "points_balance": points_balance,
-        "total_balance": (
-            float(math.ceil(prod_total_balance))
-            if unit == "шт"
-            else round(prod_total_balance, 2)
-        ),
+        points_balance = {}
+        prod_total_balance = 0.0
+
+        for pid in points_dict.keys():
+            p_init = initial_stock.get(str(pid), {}) if str(pid) in initial_stock else initial_stock.get(pid, {})
+            init_val = p_init.get(prod_name, 0.0) if isinstance(p_init, dict) else float(p_init or 0.0)
+
+            p_purch = purchases_between.get(pid, {})
+            purch_val = p_purch.get(prod_name, 0.0) if isinstance(p_purch, dict) else float(p_purch or 0.0)
+
+            p_cons = consumed_between.get(pid, {})
+            cons_val = p_cons.get(prod_name, 0.0) if isinstance(p_cons, dict) else float(p_cons or 0.0)
+
+            bal = (init_val + purch_val) - cons_val
+            bal_rounded = float(math.ceil(bal)) if unit == "шт" else round(bal, 2)
+
+            points_balance[pid] = bal_rounded
+            prod_total_balance += bal_rounded
+
+        balance_report[prod_name] = {
+            "unit": unit,
+            "points_balance": points_balance,
+            "total_balance": float(math.ceil(prod_total_balance)) if unit == "шт" else round(prod_total_balance, 2)
+        }
+
+    return {
+        "date": report_date,
+        "region": region,
+        "inv_date": inv_date_used,
+        "points": points_list,
+        "balance_report": balance_report
     }
 
-  return {
-      "date": report_date,
-      "region": region,
-      "inv_date": inv_date_used,
-      "points": points_list,
-      "balance_report": balance_report,
-  }
 
+def _apply_excel_table_style(worksheet, df: pd.DataFrame, col_width_mid: float = 10.0, row_height_pt: float = 20.0):
+    thin_border = Border(
+        left=Side(style='thin', color='CCCCCC'),
+        right=Side(style='thin', color='CCCCCC'),
+        top=Side(style='thin', color='CCCCCC'),
+        bottom=Side(style='thin', color='CCCCCC')
+    )
+    header_fill = PatternFill(start_color='E0E0E0', end_color='E0E0E0', fill_type='solid')
+    header_font = Font(bold=True)
 
-def _apply_excel_table_style(
-    worksheet, df: pd.DataFrame, col_width_mid: float = 10.0, row_height_pt: float = 20.0
-):
-  thin_border = Border(
-      left=Side(style="thin", color="CCCCCC"),
-      right=Side(style="thin", color="CCCCCC"),
-      top=Side(style="thin", color="CCCCCC"),
-      bottom=Side(style="thin", color="CCCCCC"),
-  )
-  header_fill = PatternFill(
-      start_color="E0E0E0", end_color="E0E0E0", fill_type="solid"
-  )
-  header_font = Font(bold=True)
+    for row_idx, row in enumerate(worksheet.iter_rows(min_row=1, max_row=len(df) + 1, min_col=1, max_col=len(df.columns)), start=1):
+        for cell in row:
+            cell.border = thin_border
+            if row_idx == 1:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            else:
+                cell.alignment = Alignment(horizontal="left" if cell.column == 1 else "center", vertical="center")
 
-  for row_idx, row in enumerate(
-      worksheet.iter_rows(
-          min_row=1,
-          max_row=len(df) + 1,
-          min_col=1,
-          max_col=len(df.columns),
-      ),
-      start=1,
-  ):
-    for cell in row:
-      cell.border = thin_border
-      if row_idx == 1:
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(
-            horizontal="center", vertical="center", wrap_text=True
-        )
-      else:
-        cell.alignment = Alignment(
-            horizontal="left" if cell.column == 1 else "center",
-            vertical="center",
-        )
+    worksheet.row_dimensions[1].height = 25
+    for r_i in range(2, len(df) + 2):
+        worksheet.row_dimensions[r_i].height = row_height_pt
 
-  worksheet.row_dimensions[1].height = 25
-  for r_i in range(2, len(df) + 2):
-    worksheet.row_dimensions[r_i].height = row_height_pt
-
-  worksheet.column_dimensions["A"].width = 21.4
-  num_columns = len(df.columns)
-  for col_idx in range(2, num_columns):
-    col_letter = openpyxl.utils.get_column_letter(col_idx)
-    worksheet.column_dimensions[col_letter].width = col_width_mid
-  if num_columns >= 2:
-    last_col_letter = openpyxl.utils.get_column_letter(num_columns)
-    worksheet.column_dimensions[last_col_letter].width = 17.14
+    worksheet.column_dimensions['A'].width = 21.4
+    num_columns = len(df.columns)
+    for col_idx in range(2, num_columns):
+        col_letter = openpyxl.utils.get_column_letter(col_idx)
+        worksheet.column_dimensions[col_letter].width = col_width_mid
+    if num_columns >= 2:
+        last_col_letter = openpyxl.utils.get_column_letter(num_columns)
+        worksheet.column_dimensions[last_col_letter].width = 17.14
 
 
 @app.get("/api/balance/export/excel")
 def export_balance_excel(report_date: str, region: str = "Город"):
-  try:
-    data = get_balance_report(report_date, region)
-  except Exception as e:
-    raise HTTPException(
-        status_code=400, detail=f"Ошибка расчета остатков: {str(e)}"
+    try:
+        data = get_balance_report(report_date, region)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Ошибка расчета остатков: {str(e)}")
+
+    points = data.get("points", [])
+    balance_report = data.get("balance_report", {})
+
+    rows_data = []
+    for prod_name, prod_info in balance_report.items():
+        row = {"Продукт": prod_name, "Ед. изм.": prod_info["unit"]}
+        for p in points:
+            row[p["name"]] = prod_info["points_balance"].get(p["id"], 0.0)
+        row["ИТОГО ОСТАТОК"] = prod_info["total_balance"]
+        rows_data.append(row)
+
+    df = pd.DataFrame(rows_data)
+    if df.empty:
+        columns = ["Продукт", "Ед. изм."] + [p["name"] for p in points] + ["ИТОГО ОСТАТОК"]
+        df = pd.DataFrame(columns=columns)
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Остатки")
+        _apply_excel_table_style(writer.sheets["Остатки"], df, col_width_mid=10.0)
+
+    output.seek(0)
+    region_safe = "Gorod" if region == "Город" else "Rayon"
+    filename = f"Balance_Report_{region_safe}_{report_date}.xlsx"
+
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
-
-  points = data.get("points", [])
-  balance_report = data.get("balance_report", {})
-
-  rows_data = []
-  for prod_name, prod_info in balance_report.items():
-    row = {"Продукт": prod_name, "Ед. изм.": prod_info["unit"]}
-    for p in points:
-      row[p["name"]] = prod_info["points_balance"].get(p["id"], 0.0)
-    row["ИТОГО ОСТАТОК"] = prod_info["total_balance"]
-    rows_data.append(row)
-
-  df = pd.DataFrame(rows_data)
-  if df.empty:
-    columns = (
-        ["Продукт", "Ед. изм."]
-        + [p["name"] for p in points]
-        + ["ИТОГО ОСТАТОК"]
-    )
-    df = pd.DataFrame(columns=columns)
-
-  output = io.BytesIO()
-  with pd.ExcelWriter(output, engine="openpyxl") as writer:
-    df.to_excel(writer, index=False, sheet_name="Остатки")
-    _apply_excel_table_style(writer.sheets["Остатки"], df, col_width_mid=10.0)
-
-  output.seek(0)
-  region_safe = "Gorod" if region == "Город" else "Rayon"
-  filename = f"Balance_Report_{region_safe}_{report_date}.xlsx"
-
-  return StreamingResponse(
-      output,
-      media_type=(
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-      ),
-      headers={"Content-Disposition": f"attachment; filename={filename}"},
-  )
-
-
-# --- СОХРАНЕНИЕ / УДАЛЕНИЕ ФАКТА С БЛОКИРОВКОЙ ЗАКРЫТЫХ МЕСЯЦЕВ ---
 
 
 @app.post("/api/fact/children")
 def save_fact_children_api(data: dict, report_date: str, region: str = "Город"):
-  assert_month_open(report_date, region)
-  save_fact_children_for_date(report_date, region, data)
-  return {"status": "success"}
+    assert_month_open(report_date, region)
+    save_fact_children_for_date(report_date, region, data)
+    return {"status": "success"}
 
 
 @app.delete("/api/fact/children")
 def delete_fact_children_api(report_date: str, region: str = "Город"):
-  assert_month_open(report_date, region)
-  delete_fact_children_for_date(report_date, region)
-  return {"status": "success"}
+    assert_month_open(report_date, region)
+    delete_fact_children_for_date(report_date, region)
+    return {"status": "success"}
 
 
 @app.post("/api/fact-staff/staff")
 def save_fact_staff_api(data: dict, report_date: str, region: str = "Город"):
-  assert_month_open(report_date, region)
-  save_fact_staff_for_date(report_date, region, data)
-  return {"status": "success"}
+    assert_month_open(report_date, region)
+    save_fact_staff_for_date(report_date, region, data)
+    return {"status": "success"}
 
 
 @app.delete("/api/fact-staff/staff")
 def delete_fact_staff_api(report_date: str, region: str = "Город"):
-  assert_month_open(report_date, region)
-  delete_fact_staff_for_date(report_date, region)
-  return {"status": "success"}
-
-
-# --- ЭКСПОРТЫ ДЕТИ И СОТРУДНИКИ ---
+    assert_month_open(report_date, region)
+    delete_fact_staff_for_date(report_date, region)
+    return {"status": "success"}
 
 
 @app.get("/api/fact/export/all-regions-excel")
 def export_fact_all_regions_excel(report_date: str):
-  try:
-    date.fromisoformat(report_date)
-  except Exception:
-    raise HTTPException(status_code=400, detail="Неверный формат даты")
+    try:
+        date.fromisoformat(report_date)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Неверный формат даты")
 
-  output = io.BytesIO()
-  with pd.ExcelWriter(output, engine="openpyxl") as writer:
-    for region in ["Город", "Район"]:
-      report_data = get_fact_report(report_date, region)
-      points_dict = load_points_from_excel(region)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for region in ["Город", "Район"]:
+            report_data = get_fact_report(report_date, region)
+            points_dict = load_points_from_excel(region)
 
-      rows_data = []
-      fact_cons = report_data.get("fact_consumption", {})
-      for prod_name, pdata in fact_cons.items():
-        row = {"Продукт": prod_name, "Ед. изм.": pdata["unit"]}
-        for pid, pinfo in points_dict.items():
-          row[pinfo["name"]] = pdata["points_qty"].get(pid, 0.0)
-        row["ИТОГО ФАКТ"] = pdata["total_fact"]
-        rows_data.append(row)
+            rows_data = []
+            fact_cons = report_data.get("fact_consumption", {})
+            for prod_name, pdata in fact_cons.items():
+                row = {"Продукт": prod_name, "Ед. изм.": pdata["unit"]}
+                for pid, pinfo in points_dict.items():
+                    row[pinfo["name"]] = pdata["points_qty"].get(pid, 0.0)
+                row["ИТОГО ФАКТ"] = pdata["total_fact"]
+                rows_data.append(row)
 
-      df = pd.DataFrame(rows_data)
-      if df.empty:
-        df = pd.DataFrame(columns=["Продукт", "Ед. изм.", "ИТОГО ФАКТ"])
-      df.to_excel(writer, index=False, sheet_name=region)
+            df = pd.DataFrame(rows_data)
+            if df.empty:
+                df = pd.DataFrame(columns=["Продукт", "Ед. изм.", "ИТОГО ФАКТ"])
+            df.to_excel(writer, index=False, sheet_name=region)
 
-  output.seek(0)
-  return StreamingResponse(
-      output,
-      media_type=(
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-      ),
-      headers={
-          "Content-Disposition": (
-              f"attachment; filename=Fact_Consumption_All_Regions_{report_date}.xlsx"
-          )
-      },
-  )
+    output.seek(0)
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=Fact_Consumption_All_Regions_{report_date}.xlsx"}
+    )
 
 
 @app.get("/api/fact-staff/export/all-regions-excel")
 def export_fact_staff_all_regions_excel(report_date: str):
-  try:
-    date.fromisoformat(report_date)
-  except Exception:
-    raise HTTPException(status_code=400, detail="Неверный формат даты")
+    try:
+        date.fromisoformat(report_date)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Неверный формат даты")
 
-  output = io.BytesIO()
-  with pd.ExcelWriter(output, engine="openpyxl") as writer:
-    for region in ["Город", "Район"]:
-      report_data = get_fact_staff_report(report_date, region)
-      points_dict = load_points_from_excel(region)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for region in ["Город", "Район"]:
+            report_data = get_fact_staff_report(report_date, region)
+            points_dict = load_points_from_excel(region)
 
-      rows_data = []
-      fact_cons = report_data.get("fact_consumption", {})
-      for prod_name, pdata in fact_cons.items():
-        row = {"Продукт": prod_name, "Ед. изм.": pdata["unit"]}
-        for pid, pinfo in points_dict.items():
-          row[pinfo["name"]] = pdata["points_qty"].get(pid, 0.0)
-        row["ИТОГО ФАКТ"] = pdata["total_fact"]
-        rows_data.append(row)
+            rows_data = []
+            fact_cons = report_data.get("fact_consumption", {})
+            for prod_name, pdata in fact_cons.items():
+                row = {"Продукт": prod_name, "Ед. изм.": pdata["unit"]}
+                for pid, pinfo in points_dict.items():
+                    row[pinfo["name"]] = pdata["points_qty"].get(pid, 0.0)
+                row["ИТОГО ФАКТ"] = pdata["total_fact"]
+                rows_data.append(row)
 
-      df = pd.DataFrame(rows_data)
-      if df.empty:
-        df = pd.DataFrame(columns=["Продукт", "Ед. изм.", "ИТОГО ФАКТ"])
-      df.to_excel(writer, index=False, sheet_name=region)
+            df = pd.DataFrame(rows_data)
+            if df.empty:
+                df = pd.DataFrame(columns=["Продукт", "Ед. изм.", "ИТОГО ФАКТ"])
+            df.to_excel(writer, index=False, sheet_name=region)
 
-  output.seek(0)
-  return StreamingResponse(
-      output,
-      media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      headers={
-          "Content-Disposition": (
-              f"attachment; filename=Fact_Staff_Consumption_{report_date}.xlsx"
-          )
-      },
-  )
+    output.seek(0)
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=Fact_Staff_Consumption_{report_date}.xlsx"}
+    )
 
 
 @app.get("/api/fact/export/children-matrix")
 def export_children_matrix_excel(month: str, region: str = "Город"):
-  try:
-    parts = month.split("-")
-    year = int(parts[0])
-    m = int(parts[1])
-  except Exception:
-    raise HTTPException(
-        status_code=400,
-        detail="Неверный формат месяца. Используйте YYYY-MM",
-    )
+    try:
+        parts = month.split("-")
+        year = int(parts[0])
+        m = int(parts[1])
+    except Exception:
+        raise HTTPException(status_code=400, detail="Неверный формат месяца. Используйте YYYY-MM")
 
-  start_date = date(year, m, 1)
-  end_date = (
-      date(year + 1, 1, 1) - timedelta(days=1)
-      if m == 12
-      else date(year, m + 1, 1) - timedelta(days=1)
-  )
+    start_date = date(year, m, 1)
+    end_date = date(year + 1, 1, 1) - timedelta(days=1) if m == 12 else date(year, m + 1, 1) - timedelta(days=1)
 
-  try:
-    points_dict = load_points_from_excel(region)
-    fact_storage = load_fact_children_settings()
+    try:
+        points_dict = load_points_from_excel(region)
+        fact_storage = load_fact_children_settings()
 
-    rows_data = []
-    current = start_date
-    while current <= end_date:
-      d_str = current.isoformat()
-      closed_day = get_closed_day_snapshot(d_str, region)
+        rows_data = []
+        current = start_date
+        while current <= end_date:
+            d_str = current.isoformat()
+            closed_day = get_closed_day_snapshot(d_str, region)
 
-      row = {"Дата": d_str}
-      if closed_day is not None:
-        snap_ch = closed_day.get("children_counts", {})
-        for pid, pinfo in points_dict.items():
-          row[pinfo["name"]] = _safe_int_or_zero(
-              snap_ch.get(str(pid), snap_ch.get(pid, 0))
-          )
-      else:
-        saved_day_fact = fact_storage.get(d_str, {}).get(region, {})
-        for pid, pinfo in points_dict.items():
-          val = saved_day_fact.get(str(pid))
-          if val is None:
-            val = saved_day_fact.get(pid, pinfo["children_count"])
-          try:
-            num_val = (
-                int(float(val))
-                if val != "" and val is not None
-                else int(pinfo["children_count"])
-            )
-          except Exception:
-            num_val = 0
-          row[pinfo["name"]] = num_val
+            row = {"Дата": d_str}
+            if closed_day is not None:
+                snap_ch = closed_day.get("children_counts", {})
+                for pid, pinfo in points_dict.items():
+                    row[pinfo["name"]] = _safe_int_or_zero(snap_ch.get(str(pid), snap_ch.get(pid, 0)))
+            else:
+                saved_day_fact = fact_storage.get(d_str, {}).get(region, {})
+                for pid, pinfo in points_dict.items():
+                    val = saved_day_fact.get(str(pid))
+                    if val is None:
+                        val = saved_day_fact.get(pid, pinfo["children_count"])
+                    try:
+                        num_val = int(float(val)) if val != "" and val is not None else int(pinfo["children_count"])
+                    except Exception:
+                        num_val = 0
+                    row[pinfo["name"]] = num_val
 
-      rows_data.append(row)
-      current += timedelta(days=1)
+            rows_data.append(row)
+            current += timedelta(days=1)
 
-    df = pd.DataFrame(rows_data)
-    if df.empty:
-      df = pd.DataFrame(columns=["Дата"])
+        df = pd.DataFrame(rows_data)
+        if df.empty:
+            df = pd.DataFrame(columns=["Дата"])
 
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-      df.to_excel(writer, index=False, sheet_name=f"Дети_{region}_{month}")
-    output.seek(0)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name=f"Дети_{region}_{month}")
+        output.seek(0)
 
-    region_safe = "Gorod" if region == "Город" else "Rayon"
-    return StreamingResponse(
-        output,
-        media_type=(
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        ),
-        headers={
-            "Content-Disposition": (
-                f"attachment; filename=Children_Attendance_{region_safe}_{month}.xlsx"
-            )
-        },
-    )
-  except Exception as e:
-    print(f"❌ Ошибка в export_children_matrix_excel: {e}")
-    raise HTTPException(
-        status_code=500, detail=f"Ошибка генерации файла: {str(e)}"
-    )
+        region_safe = "Gorod" if region == "Город" else "Rayon"
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename=Children_Attendance_{region_safe}_{month}.xlsx"}
+        )
+    except Exception as e:
+        print(f"❌ Ошибка в export_children_matrix_excel: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка генерации файла: {str(e)}")
 
 
 @app.get("/api/fact-staff/export/staff-matrix")
 def export_staff_matrix_excel(month: str, region: str = "Город"):
-  try:
-    parts = month.split("-")
-    year = int(parts[0])
-    m = int(parts[1])
-  except Exception:
-    raise HTTPException(
-        status_code=400,
-        detail="Неверный формат месяца. Используйте YYYY-MM",
-    )
+    try:
+        parts = month.split("-")
+        year = int(parts[0])
+        m = int(parts[1])
+    except Exception:
+        raise HTTPException(status_code=400, detail="Неверный формат месяца. Используйте YYYY-MM")
 
-  start_date = date(year, m, 1)
-  end_date = (
-      date(year + 1, 1, 1) - timedelta(days=1)
-      if m == 12
-      else date(year, m + 1, 1) - timedelta(days=1)
-  )
+    start_date = date(year, m, 1)
+    end_date = date(year + 1, 1, 1) - timedelta(days=1) if m == 12 else date(year, m + 1, 1) - timedelta(days=1)
 
-  try:
-    points_dict = load_points_from_excel(region)
-    staff_storage = load_fact_staff_settings()
+    try:
+        points_dict = load_points_from_excel(region)
+        staff_storage = load_fact_staff_settings()
 
-    rows_data = []
-    current = start_date
-    while current <= end_date:
-      d_str = current.isoformat()
-      closed_day = get_closed_day_snapshot(d_str, region)
-      row = {"Дата": d_str}
+        rows_data = []
+        current = start_date
+        while current <= end_date:
+            d_str = current.isoformat()
+            closed_day = get_closed_day_snapshot(d_str, region)
+            row = {"Дата": d_str}
 
-      if closed_day is not None:
-        snap_st = closed_day.get("staff_counts", {})
-        for pid, pinfo in points_dict.items():
-          row[pinfo["name"]] = _safe_int_or_zero(
-              snap_st.get(str(pid), snap_st.get(pid, 0))
-          )
-      else:
-        saved_day_fact = staff_storage.get(d_str, {}).get(region, {})
-        for pid, pinfo in points_dict.items():
-          val = saved_day_fact.get(str(pid), saved_day_fact.get(pid, 0))
-          row[pinfo["name"]] = _safe_int_or_zero(val)
+            if closed_day is not None:
+                snap_st = closed_day.get("staff_counts", {})
+                for pid, pinfo in points_dict.items():
+                    row[pinfo["name"]] = _safe_int_or_zero(snap_st.get(str(pid), snap_st.get(pid, 0)))
+            else:
+                saved_day_fact = staff_storage.get(d_str, {}).get(region, {})
+                for pid, pinfo in points_dict.items():
+                    val = saved_day_fact.get(str(pid), saved_day_fact.get(pid, 0))
+                    row[pinfo["name"]] = _safe_int_or_zero(val)
 
-      rows_data.append(row)
-      current += timedelta(days=1)
+            rows_data.append(row)
+            current += timedelta(days=1)
 
-    df = pd.DataFrame(rows_data)
-    if df.empty:
-      df = pd.DataFrame(columns=["Дата"])
+        df = pd.DataFrame(rows_data)
+        if df.empty:
+            df = pd.DataFrame(columns=["Дата"])
 
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-      df.to_excel(writer, index=False, sheet_name=f"Сотрудники_{region}_{month}")
-    output.seek(0)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name=f"Сотрудники_{region}_{month}")
+        output.seek(0)
 
-    region_safe = "Gorod" if region == "Город" else "Rayon"
-    return StreamingResponse(
-        output,
-        media_type=(
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        ),
-        headers={
-            "Content-Disposition": (
-                f"attachment; filename=Staff_Attendance_{region_safe}_{month}.xlsx"
-            )
-        },
-    )
-  except Exception as e:
-    print(f"❌ Ошибка в export_staff_matrix_excel: {e}")
-    raise HTTPException(
-        status_code=500, detail=f"Ошибка генерации файла: {str(e)}"
-    )
+        region_safe = "Gorod" if region == "Город" else "Rayon"
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename=Staff_Attendance_{region_safe}_{month}.xlsx"}
+        )
+    except Exception as e:
+        print(f"❌ Ошибка в export_staff_matrix_excel: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка генерации файла: {str(e)}")
 
 
 @app.get("/api/fact/export/monthly-mtt-excel")
 def export_monthly_mtt_consumption_excel(month: str, region: str = "Город"):
-  try:
-    parts = month.split("-")
-    year = int(parts[0])
-    m = int(parts[1])
-  except Exception:
-    raise HTTPException(
-        status_code=400,
-        detail="Неверный формат месяца. Используйте YYYY-MM",
-    )
+    try:
+        parts = month.split("-")
+        year = int(parts[0])
+        m = int(parts[1])
+    except Exception:
+        raise HTTPException(status_code=400, detail="Неверный формат месяца. Используйте YYYY-MM")
 
-  start_date = date(year, m, 1)
-  end_date = (
-      date(year + 1, 1, 1) - timedelta(days=1)
-      if m == 12
-      else date(year, m + 1, 1) - timedelta(days=1)
-  )
+    start_date = date(year, m, 1)
+    end_date = date(year + 1, 1, 1) - timedelta(days=1) if m == 12 else date(year, m + 1, 1) - timedelta(days=1)
 
-  try:
-    points_dict = load_points_from_excel(region)
-    fact_storage = load_fact_children_settings()
+    try:
+        points_dict = load_points_from_excel(region)
+        fact_storage = load_fact_children_settings()
 
-    rows_data = []
-    current = start_date
-    while current <= end_date:
-      d_str = current.isoformat()
-      closed_day = get_closed_day_snapshot(d_str, region)
+        rows_data = []
+        current = start_date
+        while current <= end_date:
+            d_str = current.isoformat()
+            closed_day = get_closed_day_snapshot(d_str, region)
 
-      if closed_day is not None:
-        snap_cons = closed_day.get("children_consumption", {})
-        for prod_name, pdata in snap_cons.items():
-          unit = pdata.get("unit", "кг")
-          pts_q = pdata.get("points_qty", {})
-          for pid, pinfo in points_dict.items():
-            qty = float(pts_q.get(str(pid), pts_q.get(pid, 0.0)) or 0.0)
-            if qty > 0:
-              rows_data.append({
-                  "Дата": d_str,
-                  "МТТ": pinfo["name"],
-                  "Номенклатура": prod_name,
-                  "ед. изм.": unit,
-                  "кол-во": qty,
-              })
-      else:
-        menu_num = get_menu_number_for_date_custom(current)
-        if menu_num is not None:
-          menu_items = load_menu_from_excel(menu_num)
-          saved_day_fact = fact_storage.get(d_str, {}).get(region, {})
+            if closed_day is not None:
+                snap_cons = closed_day.get("children_consumption", {})
+                for prod_name, pdata in snap_cons.items():
+                    unit = pdata.get("unit", "кг")
+                    pts_q = pdata.get("points_qty", {})
+                    for pid, pinfo in points_dict.items():
+                        qty = float(pts_q.get(str(pid), pts_q.get(pid, 0.0)) or 0.0)
+                        if qty > 0:
+                            rows_data.append({
+                                "Дата": d_str,
+                                "МТТ": pinfo["name"],
+                                "Номенклатура": prod_name,
+                                "ед. изм.": unit,
+                                "кол-во": qty
+                            })
+            else:
+                menu_num = get_menu_number_for_date_custom(current)
+                if menu_num is not None:
+                    menu_items = load_menu_from_excel(menu_num)
+                    saved_day_fact = fact_storage.get(d_str, {}).get(region, {})
 
-          for pid, pinfo in points_dict.items():
-            p_name = pinfo["name"]
-            val = saved_day_fact.get(str(pid))
-            if val is None:
-              val = saved_day_fact.get(pid, pinfo["children_count"])
+                    for pid, pinfo in points_dict.items():
+                        p_name = pinfo["name"]
+                        val = saved_day_fact.get(str(pid))
+                        if val is None:
+                            val = saved_day_fact.get(pid, pinfo["children_count"])
 
-            try:
-              child_cnt = (
-                  int(float(val))
-                  if val != "" and val is not None
-                  else int(pinfo["children_count"])
-              )
-            except Exception:
-              child_cnt = 0
+                        try:
+                            child_cnt = int(float(val)) if val != "" and val is not None else int(pinfo["children_count"])
+                        except Exception:
+                            child_cnt = 0
 
-            for prod_name, pdata in menu_items.items():
-              kg_per_child = pdata.get("qty_per_child", 0.0)
-              unit = pdata.get("unit", "кг")
-              raw_val = kg_per_child * child_cnt
-              qty = (
-                  float(math.ceil(raw_val))
-                  if unit == "шт"
-                  else round(raw_val, 2)
-              )
-              if qty > 0:
-                rows_data.append({
-                    "Дата": d_str,
-                    "МТТ": p_name,
-                    "Номенклатура": prod_name,
-                    "ед. изм.": unit,
-                    "кол-во": qty,
-                })
+                        for prod_name, pdata in menu_items.items():
+                            kg_per_child = pdata.get("qty_per_child", 0.0)
+                            unit = pdata.get("unit", "кг")
+                            raw_val = kg_per_child * child_cnt
+                            qty = float(math.ceil(raw_val)) if unit == "шт" else round(raw_val, 2)
+                            if qty > 0:
+                                rows_data.append({
+                                    "Дата": d_str,
+                                    "МТТ": p_name,
+                                    "Номенклатура": prod_name,
+                                    "ед. изм.": unit,
+                                    "кол-во": qty
+                                })
 
-      current += timedelta(days=1)
+            current += timedelta(days=1)
 
-    df = pd.DataFrame(rows_data)
-    if df.empty:
-      df = pd.DataFrame(
-          columns=["Дата", "МТТ", "Номенклатура", "ед. изм.", "кол-во"]
-      )
+        df = pd.DataFrame(rows_data)
+        if df.empty:
+            df = pd.DataFrame(columns=["Дата", "МТТ", "Номенклатура", "ед. изм.", "кол-во"])
 
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-      df.to_excel(writer, index=False, sheet_name=f"Месячный_расход_{month}")
-    output.seek(0)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name=f"Месячный_расход_{month}")
+        output.seek(0)
 
-    region_safe = "Gorod" if region == "Город" else "Rayon"
-    filename = f"Monthly_Consumption_MTT_{region_safe}_{month}.xlsx"
+        region_safe = "Gorod" if region == "Город" else "Rayon"
+        filename = f"Monthly_Consumption_MTT_{region_safe}_{month}.xlsx"
 
-    return StreamingResponse(
-        output,
-        media_type=(
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        ),
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
-    )
-  except Exception as e:
-    print(f"❌ Ошибка в export_monthly_mtt_consumption_excel: {e}")
-    raise HTTPException(
-        status_code=500, detail=f"Ошибка генерации файла: {str(e)}"
-    )
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+    except Exception as e:
+        print(f"❌ Ошибка в export_monthly_mtt_consumption_excel: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка генерации файла: {str(e)}")
 
 
 @app.get("/api/fact-staff/export/monthly-mtt-excel")
-def export_staff_monthly_mtt_consumption_excel(
-    month: str, region: str = "Город"
-):
-  try:
-    parts = month.split("-")
-    year = int(parts[0])
-    m = int(parts[1])
-  except Exception:
-    raise HTTPException(
-        status_code=400,
-        detail="Неверный формат месяца. Используйте YYYY-MM",
-    )
+def export_staff_monthly_mtt_consumption_excel(month: str, region: str = "Город"):
+    try:
+        parts = month.split("-")
+        year = int(parts[0])
+        m = int(parts[1])
+    except Exception:
+        raise HTTPException(status_code=400, detail="Неверный формат месяца. Используйте YYYY-MM")
 
-  start_date = date(year, m, 1)
-  end_date = (
-      date(year + 1, 1, 1) - timedelta(days=1)
-      if m == 12
-      else date(year, m + 1, 1) - timedelta(days=1)
-  )
+    start_date = date(year, m, 1)
+    end_date = date(year + 1, 1, 1) - timedelta(days=1) if m == 12 else date(year, m + 1, 1) - timedelta(days=1)
 
-  try:
-    points_dict = load_points_from_excel(region)
-    staff_storage = load_fact_staff_settings()
+    try:
+        points_dict = load_points_from_excel(region)
+        staff_storage = load_fact_staff_settings()
 
-    rows_data = []
-    current = start_date
-    while current <= end_date:
-      d_str = current.isoformat()
-      closed_day = get_closed_day_snapshot(d_str, region)
+        rows_data = []
+        current = start_date
+        while current <= end_date:
+            d_str = current.isoformat()
+            closed_day = get_closed_day_snapshot(d_str, region)
 
-      if closed_day is not None:
-        snap_cons = closed_day.get("staff_consumption", {})
-        for prod_name, pdata in snap_cons.items():
-          unit = pdata.get("unit", "кг")
-          pts_q = pdata.get("points_qty", {})
-          for pid, pinfo in points_dict.items():
-            qty = float(pts_q.get(str(pid), pts_q.get(pid, 0.0)) or 0.0)
-            if qty > 0:
-              rows_data.append({
-                  "Дата": d_str,
-                  "МТТ": pinfo["name"],
-                  "Номенклатура": prod_name,
-                  "ед. изм.": unit,
-                  "кол-во": qty,
-              })
-      else:
-        menu_num = get_menu_number_for_date_custom(current)
-        if menu_num is not None:
-          menu_items = load_staff_menu_from_excel(menu_num)
-          saved_day_fact = staff_storage.get(d_str, {}).get(region, {})
+            if closed_day is not None:
+                snap_cons = closed_day.get("staff_consumption", {})
+                for prod_name, pdata in snap_cons.items():
+                    unit = pdata.get("unit", "кг")
+                    pts_q = pdata.get("points_qty", {})
+                    for pid, pinfo in points_dict.items():
+                        qty = float(pts_q.get(str(pid), pts_q.get(pid, 0.0)) or 0.0)
+                        if qty > 0:
+                            rows_data.append({
+                                "Дата": d_str,
+                                "МТТ": pinfo["name"],
+                                "Номенклатура": prod_name,
+                                "ед. изм.": unit,
+                                "кол-во": qty
+                            })
+            else:
+                menu_num = get_menu_number_for_date_custom(current)
+                if menu_num is not None:
+                    menu_items = load_staff_menu_from_excel(menu_num)
+                    saved_day_fact = staff_storage.get(d_str, {}).get(region, {})
 
-          for pid, pinfo in points_dict.items():
-            p_name = pinfo["name"]
-            val = saved_day_fact.get(str(pid), saved_day_fact.get(pid, 0))
-            staff_cnt = _safe_int_or_zero(val)
+                    for pid, pinfo in points_dict.items():
+                        p_name = pinfo["name"]
+                        val = saved_day_fact.get(str(pid), saved_day_fact.get(pid, 0))
+                        staff_cnt = _safe_int_or_zero(val)
 
-            for prod_name, pdata in menu_items.items():
-              kg_per_staff = pdata.get("qty_per_staff", 0.0)
-              unit = pdata.get("unit", "кг")
-              raw_val = kg_per_staff * staff_cnt
-              qty = (
-                  float(math.ceil(raw_val))
-                  if unit == "шт"
-                  else round(raw_val, 2)
-              )
-              if qty > 0:
-                rows_data.append({
-                    "Дата": d_str,
-                    "МТТ": p_name,
-                    "Номенклатура": prod_name,
-                    "ед. изм.": unit,
-                    "кол-во": qty,
-                })
+                        for prod_name, pdata in menu_items.items():
+                            kg_per_staff = pdata.get("qty_per_staff", 0.0)
+                            unit = pdata.get("unit", "кг")
+                            raw_val = kg_per_staff * staff_cnt
+                            qty = float(math.ceil(raw_val)) if unit == "шт" else round(raw_val, 2)
+                            if qty > 0:
+                                rows_data.append({
+                                    "Дата": d_str,
+                                    "МТТ": p_name,
+                                    "Номенклатура": prod_name,
+                                    "ед. изм.": unit,
+                                    "кол-во": qty
+                                })
 
-      current += timedelta(days=1)
+            current += timedelta(days=1)
 
-    df = pd.DataFrame(rows_data)
-    if df.empty:
-      df = pd.DataFrame(
-          columns=["Дата", "МТТ", "Номенклатура", "ед. изм.", "кол-во"]
-      )
+        df = pd.DataFrame(rows_data)
+        if df.empty:
+            df = pd.DataFrame(columns=["Дата", "МТТ", "Номенклатура", "ед. изм.", "кол-во"])
 
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-      df.to_excel(
-          writer, index=False, sheet_name=f"Расход_сотр_{month}"
-      )
-    output.seek(0)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name=f"Расход_сотр_{month}")
+        output.seek(0)
 
-    region_safe = "Gorod" if region == "Город" else "Rayon"
-    filename = f"Monthly_Staff_Consumption_MTT_{region_safe}_{month}.xlsx"
+        region_safe = "Gorod" if region == "Город" else "Rayon"
+        filename = f"Monthly_Staff_Consumption_MTT_{region_safe}_{month}.xlsx"
 
-    return StreamingResponse(
-        output,
-        media_type=(
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        ),
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
-    )
-  except Exception as e:
-    print(f"❌ Ошибка в export_staff_monthly_mtt_consumption_excel: {e}")
-    raise HTTPException(
-        status_code=500, detail=f"Ошибка генерации файла: {str(e)}"
-    )
-
-
-# --- TELEGRAM ---
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+    except Exception as e:
+        print(f"❌ Ошибка в export_staff_monthly_mtt_consumption_excel: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка генерации файла: {str(e)}")
 
 
 @app.post("/api/menu/generate-and-send")
-def generate_and_send_menu_api(
-    report_date: str, background_tasks: BackgroundTasks, region: str = "Город"
-):
-  try:
-    parsed_date = date.fromisoformat(report_date)
-  except Exception:
-    raise HTTPException(status_code=400, detail="Неверная дата")
+def generate_and_send_menu_api(report_date: str, background_tasks: BackgroundTasks, region: str = "Город"):
+    try:
+        parsed_date = date.fromisoformat(report_date)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Неверная дата")
 
-  fact_storage = load_fact_children_settings()
-  saved_fact = fact_storage.get(report_date, {}).get(region, {})
+    fact_storage = load_fact_children_settings()
+    saved_fact = fact_storage.get(report_date, {}).get(region, {})
 
-  if not saved_fact:
-    raise HTTPException(
-        status_code=400,
-        detail=(
-            f"Нет сохраненной проводки факта за {report_date} ({region})."
-            " Отправка PDF невозможна."
-        ),
+    if not saved_fact:
+        raise HTTPException(status_code=400, detail=f"Нет сохраненной проводки факта за {report_date} ({region}). Отправка PDF невозможна.")
+
+    menu_num = get_menu_number_for_date_custom(parsed_date)
+    if not menu_num:
+        raise HTTPException(status_code=400, detail="На указанную дату по календарю выходной день.")
+
+    background_tasks.add_task(
+        process_and_send_menu_in_background,
+        report_date=report_date,
+        region=region,
+        saved_fact=saved_fact,
+        menu_num=menu_num
     )
-
-  menu_num = get_menu_number_for_date_custom(parsed_date)
-  if not menu_num:
-    raise HTTPException(
-        status_code=400, detail="На указанную дату по календарю выходной день."
-    )
-
-  background_tasks.add_task(
-      process_and_send_menu_in_background,
-      report_date=report_date,
-      region=region,
-      saved_fact=saved_fact,
-      menu_num=menu_num,
-  )
-  return {
-      "status": "success",
-      "message": (
-          "Процесс отправки запущен в фоновом режиме! Файлы будут поступать в"
-          " Telegram по очереди."
-      ),
-  }
+    return {"status": "success", "message": "Процесс отправки запущен в фоновом режиме! Файлы будут поступать в Telegram по очереди."}
 
 
 @app.post("/api/menu-staff/generate-and-send")
-def generate_and_send_staff_menu_api(
-    report_date: str, background_tasks: BackgroundTasks, region: str = "Город"
-):
-  try:
-    parsed_date = date.fromisoformat(report_date)
-  except Exception:
-    raise HTTPException(status_code=400, detail="Неверная дата")
+def generate_and_send_staff_menu_api(report_date: str, background_tasks: BackgroundTasks, region: str = "Город"):
+    try:
+        parsed_date = date.fromisoformat(report_date)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Неверная дата")
 
-  fact_storage = load_fact_staff_settings()
-  saved_fact = fact_storage.get(report_date, {}).get(region, {})
+    fact_storage = load_fact_staff_settings()
+    saved_fact = fact_storage.get(report_date, {}).get(region, {})
 
-  if not saved_fact:
-    raise HTTPException(
-        status_code=400,
-        detail=f"Нет сохраненного факта сотрудников за {report_date} ({region}).",
+    if not saved_fact:
+        raise HTTPException(status_code=400, detail=f"Нет сохраненного факта сотрудников за {report_date} ({region}).")
+
+    menu_num = get_menu_number_for_date_custom(parsed_date)
+    if not menu_num:
+        raise HTTPException(status_code=400, detail="На указанную дату по календарю выходной день.")
+
+    background_tasks.add_task(
+        process_and_send_staff_menu_in_background,
+        report_date=report_date,
+        region=region,
+        saved_fact=saved_fact,
+        menu_num=menu_num
     )
-
-  menu_num = get_menu_number_for_date_custom(parsed_date)
-  if not menu_num:
-    raise HTTPException(
-        status_code=400, detail="На указанную дату по календарю выходной день."
-    )
-
-  background_tasks.add_task(
-      process_and_send_staff_menu_in_background,
-      report_date=report_date,
-      region=region,
-      saved_fact=saved_fact,
-      menu_num=menu_num,
-  )
-  return {"status": "success", "message": "Отправка меню сотрудников запущена!"}
+    return {"status": "success", "message": "Отправка меню сотрудников запущена!"}
 
 
 # --- ИНВЕНТАРИЗАЦИЯ И ЭКСПОРТ ИНВЕНТАРИЗАЦИИ ---
 
+def _resolve_stock_date(inv_date: str | None = None, target_date: str | None = None) -> str:
+    raw = inv_date or target_date
+    if raw:
+        return str(raw).strip()
+    return date.today().isoformat()
+
 
 @app.get("/api/stock/matrix/{region}")
-def get_stock_matrix_api(region: str, inv_date: str = None):
-  points_dict = load_points_from_excel(region)
-  points_list = [
-      {
-          "id": pid,
-          "name": p["name"],
-          "children_count": p["children_count"],
-      }
-      for pid, p in points_dict.items()
-  ]
-  all_products = get_all_products_with_units()
-  stock_storage = load_stock_settings()
-  target_inv_date = inv_date if inv_date else date.today().isoformat()
-  region_stock = stock_storage.get(target_inv_date, {}).get(region, {})
+def get_stock_matrix_api(region: str, inv_date: str = None, target_date: str = None):
+    points_dict = load_points_from_excel(region)
+    points_list = [{"id": pid, "name": p["name"], "children_count": p["children_count"]} for pid, p in points_dict.items()]
+    all_products = get_all_products_with_units()
+    stock_storage = load_stock_settings()
+    resolved_date = _resolve_stock_date(inv_date, target_date)
+    region_stock = stock_storage.get(resolved_date, {}).get(region, {})
 
-  products_matrix = {}
-  for prodName, unit in all_products.items():
-    points_stock = {}
-    for pid in points_dict.keys():
-      points_stock[pid] = region_stock.get(str(pid), {}).get(prodName, 0.0)
-    products_matrix[prodName] = {"unit": unit, "points_stock": points_stock}
+    products_matrix = {}
+    for prodName, unit in all_products.items():
+        points_stock = {}
+        for pid in points_dict.keys():
+            p_data = region_stock.get(str(pid))
+            if p_data is None:
+                p_data = region_stock.get(pid, {})
+            val = p_data.get(prodName, 0.0) if isinstance(p_data, dict) else 0.0
+            points_stock[pid] = val
+        products_matrix[prodName] = {"unit": unit, "points_stock": points_stock}
 
-  return {"points": points_list, "products": products_matrix}
+    return {"points": points_list, "products": products_matrix}
 
 
 @app.post("/api/stock/matrix/{region}")
-def save_stock_matrix_api(region: str, data: dict, inv_date: str = None):
-  target_d = inv_date if inv_date else date.today().isoformat()
-  save_stock_settings_for_date(target_d, region, data)
-  return {"status": "success"}
+def save_stock_matrix_api(region: str, data: dict, inv_date: str = None, target_date: str = None):
+    resolved_date = _resolve_stock_date(inv_date, target_date)
+    save_stock_settings_for_date(resolved_date, region, data)
+    return {"status": "success"}
 
 
 @app.delete("/api/stock/matrix/{region}")
-def delete_stock_matrix_api(inv_date: str, region: str):
-  delete_stock_settings_for_date(inv_date, region)
-  return {"status": "success"}
+def delete_stock_matrix_api(region: str, inv_date: str = None, target_date: str = None):
+    resolved_date = _resolve_stock_date(inv_date, target_date)
+    delete_stock_settings_for_date(resolved_date, region)
+    return {"status": "success"}
 
 
 @app.get("/api/stock/export/excel")
-def export_stock_excel(inv_date: str, region: str = "Город"):
-  try:
-    date.fromisoformat(inv_date)
-  except Exception:
-    raise HTTPException(status_code=400, detail="Неверный формат даты")
+def export_stock_excel(region: str = "Город", inv_date: str = None, target_date: str = None):
+    resolved_date = _resolve_stock_date(inv_date, target_date)
+    try:
+        date.fromisoformat(resolved_date)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Неверный формат даты")
 
-  matrix_data = get_stock_matrix_api(region, inv_date)
-  points = matrix_data.get("points", [])
-  products = matrix_data.get("products", {})
+    matrix_data = get_stock_matrix_api(region=region, inv_date=resolved_date, target_date=resolved_date)
+    points = matrix_data.get("points", [])
+    products = matrix_data.get("products", {})
 
-  rows_data = []
-  for prod_name, p_info in products.items():
-    row = {"Продукт": prod_name, "Ед. изм.": p_info["unit"]}
-    total_val = 0.0
-    for p in points:
-      val = float(p_info["points_stock"].get(p["id"], 0.0) or 0.0)
-      row[p["name"]] = val
-      total_val += val
-    row["ИТОГО ОСТАТОК"] = (
-        float(math.ceil(total_val))
-        if p_info["unit"] == "шт"
-        else round(total_val, 2)
+    rows_data = []
+    for prod_name, p_info in products.items():
+        row = {"Продукт": prod_name, "Ед. изм.": p_info["unit"]}
+        total_val = 0.0
+        for p in points:
+            val = float(p_info["points_stock"].get(p["id"], 0.0) or 0.0)
+            row[p["name"]] = val
+            total_val += val
+        row["ИТОГО ОСТАТОК"] = float(math.ceil(total_val)) if p_info["unit"] == "шт" else round(total_val, 2)
+        rows_data.append(row)
+
+    df = pd.DataFrame(rows_data)
+    if df.empty:
+        columns = ["Продукт", "Ед. изм."] + [p["name"] for p in points] + ["ИТОГО ОСТАТОК"]
+        df = pd.DataFrame(columns=columns)
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Инвентаризация")
+        _apply_excel_table_style(writer.sheets["Инвентаризация"], df, col_width_mid=10.0)
+
+    output.seek(0)
+    region_safe = "Gorod" if region == "Город" else "Rayon"
+    filename = f"Inventory_{region_safe}_{resolved_date}.xlsx"
+
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
-    rows_data.append(row)
-
-  df = pd.DataFrame(rows_data)
-  if df.empty:
-    columns = (
-        ["Продукт", "Ед. изм."]
-        + [p["name"] for p in points]
-        + ["ИТОГО ОСТАТОК"]
-    )
-    df = pd.DataFrame(columns=columns)
-
-  output = io.BytesIO()
-  with pd.ExcelWriter(output, engine="openpyxl") as writer:
-    df.to_excel(writer, index=False, sheet_name="Инвентаризация")
-    _apply_excel_table_style(
-        writer.sheets["Инвентаризация"], df, col_width_mid=10.0
-    )
-
-  output.seek(0)
-  region_safe = "Gorod" if region == "Город" else "Rayon"
-  filename = f"Inventory_{region_safe}_{inv_date}.xlsx"
-
-  return StreamingResponse(
-      output,
-      media_type=(
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-      ),
-      headers={"Content-Disposition": f"attachment; filename={filename}"},
-  )
-
-
-# --- КАЛЕНДАРЬ МЕНЮ ---
 
 
 @app.get("/api/calendar/range")
 def get_calendar_range_api(start: str, end: str):
-  try:
-    s_date = date.fromisoformat(start)
-    e_date = date.fromisoformat(end)
-  except ValueError:
-    raise HTTPException(status_code=400, detail="Неверный формат дат")
-  cal_map = calculate_calendar_dynamic(s_date, e_date)
-  for d_str, info in cal_map.items():
-    info["is_closed"] = is_month_closed(d_str, "Город") or is_month_closed(
-        d_str, "Район"
-    )
-  return cal_map
+    try:
+        s_date = date.fromisoformat(start)
+        e_date = date.fromisoformat(end)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Неверный формат дат")
+    cal_map = calculate_calendar_dynamic(s_date, e_date)
+    for d_str, info in cal_map.items():
+        info["is_closed"] = is_month_closed(d_str, "Город") or is_month_closed(d_str, "Район")
+    return cal_map
 
 
 @app.post("/api/calendar/settings")
 def save_setting_api(data: dict):
-  date_str = data.get("date")
-  if not date_str:
-    raise HTTPException(status_code=400, detail="Дата обязательна")
-  if is_month_closed(date_str, "Город") or is_month_closed(date_str, "Район"):
-    raise HTTPException(
-        status_code=423,
-        detail=(
-            f"Дата {date_str} входит в закрытый месяц. Изменение календаря"
-            " запрещено."
-        ),
-    )
-  settings = load_manual_settings()
-  settings["days"][date_str] = {
-      "is_holiday": data.get("is_holiday", False),
-      "menu": data.get("menu"),
-  }
-  save_manual_settings(settings)
-  return {"status": "success"}
-
-
-# --- РАЗНАРЯДКА (ПО АКТУАЛЬНЫМ НОРМАМ ИЗ EXCEL, С УЧЁТОМ СНИМКОВ ЗАКРЫТЫХ ДНЕЙ В ОСТАТКАХ) ---
+    date_str = data.get("date")
+    if not date_str:
+        raise HTTPException(status_code=400, detail="Дата обязательна")
+    if is_month_closed(date_str, "Город") or is_month_closed(date_str, "Район"):
+        raise HTTPException(status_code=423, detail=f"Дата {date_str} входит в закрытый месяц. Изменение календаря запрещено.")
+    settings = load_manual_settings()
+    settings["days"][date_str] = {
+        "is_holiday": data.get("is_holiday", False),
+        "menu": data.get("menu")
+    }
+    save_manual_settings(settings)
+    return {"status": "success"}
 
 
 @app.get("/api/raznaryadka/matrix/{target_date}")
-def get_matrix_raznaryadka(
-    target_date: str,
-    region: str = "Город",
-    days_count: int = 2,
-    filter_period: str = "ALL",
-):
-  try:
-    parsed_date = date.fromisoformat(target_date)
-  except ValueError:
-    raise HTTPException(status_code=400, detail="Неверный формат даты")
+def get_matrix_raznaryadka(target_date: str, region: str = "Город", days_count: int = 2, filter_period: str = "ALL"):
+    try:
+        parsed_date = date.fromisoformat(target_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Неверный формат даты")
 
-  target_days = []
-  curr = parsed_date
-  while len(target_days) < days_count:
-    m_num = get_menu_number_for_date_custom(curr)
-    if m_num is not None:
-      target_days.append((curr, m_num))
-    curr += timedelta(days=1)
-    if (curr - parsed_date).days > 90:
-      break
-
-  if not target_days:
-    raise HTTPException(
-        status_code=400, detail="В выбранном периоде нет рабочих дней"
-    )
-
-  week_start_str = target_days[0][0].isoformat()
-  week_end_str = target_days[-1][0].isoformat()
-
-  points_dict = load_points_from_excel(region)
-  points_list = [
-      {
-          "id": pid,
-          "name": pinfo["name"],
-          "children_count": pinfo["children_count"],
-      }
-      for pid, pinfo in points_dict.items()
-  ]
-
-  stock_storage = load_stock_settings()
-  available_inv_dates = sorted(
-      [d for d in stock_storage.keys() if d <= week_start_str]
-  )
-  inv_date_used = None
-  initial_stock = {}
-  if available_inv_dates:
-    inv_date_used = available_inv_dates[-1]
-    initial_stock = stock_storage[inv_date_used].get(region, {})
-
-  purchases_storage = load_purchases_settings().get(region, {})
-  purchases_between = {}
-  inv_dt = (
-      date.fromisoformat(inv_date_used) if inv_date_used else date(2000, 1, 1)
-  )
-  first_target_date = target_days[0][0]
-  end_prev_period = first_target_date - timedelta(days=1)
-
-  for pid, p_list in purchases_storage.items():
-    for p in p_list:
-      p_date = p.get("date")
-      if p_date and inv_dt <= date.fromisoformat(p_date) <= end_prev_period:
-        if pid not in purchases_between:
-          purchases_between[pid] = {}
-        prod = p.get("product")
-        purchases_between[pid][prod] = (
-            purchases_between[pid].get(prod, 0.0) + p.get("qty", 0.0)
-        )
-
-  fact_storage = load_fact_children_settings()
-  fact_staff_storage = load_fact_staff_settings()
-  consumed_between = {}
-  if inv_date_used:
-    inv_dt_real = date.fromisoformat(inv_date_used)
-    if inv_dt_real < first_target_date:
-      curr_d = inv_dt_real
-      while curr_d <= end_prev_period:
-        d_iso = curr_d.isoformat()
-        closed_snap = get_closed_day_snapshot(d_iso, region)
-        if closed_snap is not None:
-          for prod_name, pdata in closed_snap.get(
-              "children_consumption", {}
-          ).items():
-            for pid in points_dict.keys():
-              if pid not in consumed_between:
-                consumed_between[pid] = {}
-              q_val = float(
-                  pdata.get("points_qty", {}).get(
-                      str(pid), pdata.get("points_qty", {}).get(pid, 0.0)
-                  )
-                  or 0.0
-              )
-              consumed_between[pid][prod_name] = (
-                  consumed_between[pid].get(prod_name, 0.0) + q_val
-              )
-
-          for prod_name, pdata in closed_snap.get(
-              "staff_consumption", {}
-          ).items():
-            for pid in points_dict.keys():
-              if pid not in consumed_between:
-                consumed_between[pid] = {}
-              q_val = float(
-                  pdata.get("points_qty", {}).get(
-                      str(pid), pdata.get("points_qty", {}).get(pid, 0.0)
-                  )
-                  or 0.0
-              )
-              consumed_between[pid][prod_name] = (
-                  consumed_between[pid].get(prod_name, 0.0) + q_val
-              )
-        else:
-          menu_num = get_menu_number_for_date_custom(curr_d)
-          if menu_num is not None:
-            day_menu = load_menu_from_excel(menu_num)
-            day_fact = fact_storage.get(d_iso, {}).get(region, {})
-            for pid, pinfo in points_dict.items():
-              val_ch = day_fact.get(str(pid), day_fact.get(pid))
-              children = (
-                  int(val_ch)
-                  if val_ch is not None
-                  else pinfo["children_count"]
-              )
-
-              if pid not in consumed_between:
-                consumed_between[pid] = {}
-              for prod_name, pdata in day_menu.items():
-                unit_check = pdata.get("unit", "кг")
-                raw_cons = pdata.get("qty_per_child", 0.0) * children
-                cons_val = (
-                    math.ceil(raw_cons) if unit_check == "шт" else raw_cons
-                )
-                consumed_between[pid][prod_name] = (
-                    consumed_between[pid].get(prod_name, 0.0) + cons_val
-                )
-
-            day_staff_menu = load_staff_menu_from_excel(menu_num)
-            day_fact_staff = fact_staff_storage.get(d_iso, {}).get(region, {})
-            for pid in points_dict.keys():
-              val_st = day_fact_staff.get(str(pid), day_fact_staff.get(pid, 0))
-              staff_cnt = int(val_st) if val_st is not None else 0
-              if staff_cnt > 0:
-                if pid not in consumed_between:
-                  consumed_between[pid] = {}
-                for prod_name, pdata in day_staff_menu.items():
-                  unit_check = pdata.get("unit", "кг")
-                  raw_cons = pdata.get("qty_per_staff", 0.0) * staff_cnt
-                  cons_val = (
-                      math.ceil(raw_cons) if unit_check == "шт" else raw_cons
-                  )
-                  consumed_between[pid][prod_name] = (
-                      consumed_between[pid].get(prod_name, 0.0) + cons_val
-                  )
-
-        curr_d += timedelta(days=1)
-
-  effective_stock = {}
-  for pid in points_dict.keys():
-    effective_stock[pid] = {}
-    p_init = initial_stock.get(str(pid), {})
-    p_purch = purchases_between.get(pid, {})
-    p_cons = consumed_between.get(pid, {})
-    all_prods = set(
-        list(p_init.keys()) + list(p_purch.keys()) + list(p_cons.keys())
-    )
-    for prod in all_prods:
-      init_val = float(p_init.get(prod, 0.0) or 0.0)
-      purch_val = float(p_purch.get(prod, 0.0) or 0.0)
-      cons_val = float(p_cons.get(prod, 0.0) or 0.0)
-      effective_stock[pid][prod] = (init_val + purch_val) - cons_val
-
-  matrix_data = {}
-  working_days_count = 0
-
-  running_stock = {}
-  for pid, prods in effective_stock.items():
-    running_stock[pid] = prods.copy()
-
-  for day_obj, menu_num in target_days:
-    working_days_count += 1
-    d_str = day_obj.isoformat()
-    day_fact = fact_storage.get(d_str, {}).get(region, {})
-    day_staff_fact = fact_staff_storage.get(d_str, {}).get(region, {})
-    ttk_items = load_menu_from_excel(menu_num)
-    staff_ttk_items = load_staff_menu_from_excel(menu_num)
-
-    for point_id, point_info in points_dict.items():
-      val_ch = day_fact.get(str(point_id), day_fact.get(point_id))
-
-      if val_ch is None:
-        last_known_fact = None
-        for prev_d in sorted(fact_storage.keys(), reverse=True):
-          if prev_d <= d_str and region in fact_storage[prev_d]:
-            p_val = fact_storage[prev_d][region].get(
-                str(point_id), fact_storage[prev_d][region].get(point_id)
-            )
-            if p_val is not None:
-              last_known_fact = int(p_val)
-              break
-        children = (
-            last_known_fact
-            if last_known_fact is not None
-            else point_info["children_count"]
-        )
-      else:
-        children = int(val_ch)
-
-      for prod_name, data in ttk_items.items():
-        kg_per_child = data.get("qty_per_child", 0.0)
-        unit = data["unit"]
-        gross_needed = (
-            math.ceil(kg_per_child * children)
-            if unit == "шт"
-            else kg_per_child * children
-        )
-
-        if prod_name not in matrix_data:
-          matrix_data[prod_name] = {
-              "unit": unit,
-              "points_qty": {pid: 0.0 for pid in points_dict.keys()},
-              "weekly_total": 0.0,
-          }
-
-        point_stocks = running_stock.get(point_id, {})
-        available = 0.0
-        st_key_matched = None
-        for st_prod, st_val in point_stocks.items():
-          if st_prod.strip().lower() == prod_name.strip().lower():
-            available = st_val
-            st_key_matched = st_prod
+    target_days = []
+    curr = parsed_date
+    while len(target_days) < days_count:
+        m_num = get_menu_number_for_date_custom(curr)
+        if m_num is not None:
+            target_days.append((curr, m_num))
+        curr += timedelta(days=1)
+        if (curr - parsed_date).days > 90:
             break
 
-        if available >= gross_needed:
-          net_needed = 0.0
-          if st_key_matched:
-            running_stock[point_id][st_key_matched] -= gross_needed
-        else:
-          net_needed = gross_needed - available
-          if st_key_matched:
-            running_stock[point_id][st_key_matched] = 0.0
+    if not target_days:
+        raise HTTPException(status_code=400, detail="В выбранном периоде нет рабочих дней")
 
-        if unit == "шт":
-          matrix_data[prod_name]["points_qty"][point_id] += float(
-              math.ceil(net_needed)
-          )
-        else:
-          matrix_data[prod_name]["points_qty"][point_id] += round(net_needed, 2)
+    week_start_str = target_days[0][0].isoformat()
+    week_end_str = target_days[-1][0].isoformat()
 
-      val_st = day_staff_fact.get(str(point_id), day_staff_fact.get(point_id))
-      if val_st is None:
-        last_known_staff = 0
-        for prev_d in sorted(fact_staff_storage.keys(), reverse=True):
-          if prev_d <= d_str and region in fact_staff_storage[prev_d]:
-            p_val = fact_staff_storage[prev_d][region].get(
-                str(point_id), fact_staff_storage[prev_d][region].get(point_id)
-            )
-            if p_val is not None:
-              last_known_staff = int(p_val)
-              break
-        staff_cnt = last_known_staff
-      else:
-        staff_cnt = int(val_st)
+    points_dict = load_points_from_excel(region)
+    points_list = [{"id": pid, "name": pinfo["name"], "children_count": pinfo["children_count"]} for pid, pinfo in points_dict.items()]
 
-      if staff_cnt > 0:
-        for prod_name, data in staff_ttk_items.items():
-          kg_per_staff = data.get("qty_per_staff", 0.0)
-          unit = data["unit"]
-          gross_needed = (
-              math.ceil(kg_per_staff * staff_cnt)
-              if unit == "шт"
-              else kg_per_staff * staff_cnt
-          )
+    stock_storage = load_stock_settings()
+    available_inv_dates = sorted([d for d in stock_storage.keys() if d <= week_start_str])
+    inv_date_used = None
+    initial_stock = {}
+    if available_inv_dates:
+        inv_date_used = available_inv_dates[-1]
+        initial_stock = stock_storage[inv_date_used].get(region, {})
 
-          if prod_name not in matrix_data:
-            matrix_data[prod_name] = {
-                "unit": unit,
-                "points_qty": {pid: 0.0 for pid in points_dict.keys()},
-                "weekly_total": 0.0,
-            }
+    purchases_storage = load_purchases_settings().get(region, {})
+    purchases_between = {}
+    inv_dt = date.fromisoformat(inv_date_used) if inv_date_used else date(2000, 1, 1)
+    first_target_date = target_days[0][0]
+    end_prev_period = first_target_date - timedelta(days=1)
 
-          point_stocks = running_stock.get(point_id, {})
-          available = 0.0
-          st_key_matched = None
-          for st_prod, st_val in point_stocks.items():
-            if st_prod.strip().lower() == prod_name.strip().lower():
-              available = st_val
-              st_key_matched = st_prod
-              break
+    for pid, p_list in purchases_storage.items():
+        for p in p_list:
+            p_date = p.get("date")
+            if p_date and inv_dt <= date.fromisoformat(p_date) <= end_prev_period:
+                if pid not in purchases_between:
+                    purchases_between[pid] = {}
+                prod = p.get("product")
+                purchases_between[pid][prod] = purchases_between[pid].get(prod, 0.0) + p.get("qty", 0.0)
 
-          if available >= gross_needed:
-            net_needed = 0.0
-            if st_key_matched:
-              running_stock[point_id][st_key_matched] -= gross_needed
-          else:
-            net_needed = gross_needed - available
-            if st_key_matched:
-              running_stock[point_id][st_key_matched] = 0.0
+    fact_storage = load_fact_children_settings()
+    fact_staff_storage = load_fact_staff_settings()
+    consumed_between = {}
+    if inv_date_used:
+        inv_dt_real = date.fromisoformat(inv_date_used)
+        if inv_dt_real < first_target_date:
+            curr_d = inv_dt_real
+            while curr_d <= end_prev_period:
+                d_iso = curr_d.isoformat()
+                closed_snap = get_closed_day_snapshot(d_iso, region)
+                if closed_snap is not None:
+                    for prod_name, pdata in closed_snap.get("children_consumption", {}).items():
+                        for pid in points_dict.keys():
+                            if pid not in consumed_between:
+                                consumed_between[pid] = {}
+                            q_val = float(pdata.get("points_qty", {}).get(str(pid), pdata.get("points_qty", {}).get(pid, 0.0)) or 0.0)
+                            consumed_between[pid][prod_name] = consumed_between[pid].get(prod_name, 0.0) + q_val
 
-          if unit == "шт":
-            matrix_data[prod_name]["points_qty"][point_id] += float(
-                math.ceil(net_needed)
-            )
-          else:
-            matrix_data[prod_name]["points_qty"][point_id] += round(
-                net_needed, 2
-            )
+                    for prod_name, pdata in closed_snap.get("staff_consumption", {}).items():
+                        for pid in points_dict.keys():
+                            if pid not in consumed_between:
+                                consumed_between[pid] = {}
+                            q_val = float(pdata.get("points_qty", {}).get(str(pid), pdata.get("points_qty", {}).get(pid, 0.0)) or 0.0)
+                            consumed_between[pid][prod_name] = consumed_between[pid].get(prod_name, 0.0) + q_val
+                else:
+                    menu_num = get_menu_number_for_date_custom(curr_d)
+                    if menu_num is not None:
+                        day_menu = load_menu_from_excel(menu_num)
+                        day_fact = fact_storage.get(d_iso, {}).get(region, {})
+                        for pid, pinfo in points_dict.items():
+                            val_ch = day_fact.get(str(pid), day_fact.get(pid))
+                            children = int(val_ch) if val_ch is not None else pinfo["children_count"]
 
-  for prod_name, prod_info in matrix_data.items():
-    unit = prod_info["unit"]
-    row_sum = 0.0
+                            if pid not in consumed_between:
+                                consumed_between[pid] = {}
+                            for prod_name, pdata in day_menu.items():
+                                unit_check = pdata.get("unit", "кг")
+                                raw_cons = pdata.get("qty_per_child", 0.0) * children
+                                cons_val = math.ceil(raw_cons) if unit_check == "шт" else raw_cons
+                                consumed_between[pid][prod_name] = consumed_between[pid].get(prod_name, 0.0) + cons_val
+
+                        day_staff_menu = load_staff_menu_from_excel(menu_num)
+                        day_fact_staff = fact_staff_storage.get(d_iso, {}).get(region, {})
+                        for pid in points_dict.keys():
+                            val_st = day_fact_staff.get(str(pid), day_fact_staff.get(pid, 0))
+                            staff_cnt = int(val_st) if val_st is not None else 0
+                            if staff_cnt > 0:
+                                if pid not in consumed_between:
+                                    consumed_between[pid] = {}
+                                for prod_name, pdata in day_staff_menu.items():
+                                    unit_check = pdata.get("unit", "кг")
+                                    raw_cons = pdata.get("qty_per_staff", 0.0) * staff_cnt
+                                    cons_val = math.ceil(raw_cons) if unit_check == "шт" else raw_cons
+                                    consumed_between[pid][prod_name] = consumed_between[pid].get(prod_name, 0.0) + cons_val
+
+                curr_d += timedelta(days=1)
+
+    effective_stock = {}
     for pid in points_dict.keys():
-      val = prod_info["points_qty"][pid]
-      val = float(math.ceil(val)) if unit == "шт" else round(val, 2)
-      prod_info["points_qty"][pid] = val
-      row_sum += val
+        effective_stock[pid] = {}
+        p_init = initial_stock.get(str(pid), {})
+        p_purch = purchases_between.get(pid, {})
+        p_cons = consumed_between.get(pid, {})
+        all_prods = set(list(p_init.keys()) + list(p_purch.keys()) + list(p_cons.keys()))
+        for prod in all_prods:
+            init_val = float(p_init.get(prod, 0.0) or 0.0)
+            purch_val = float(p_purch.get(prod, 0.0) or 0.0)
+            cons_val = float(p_cons.get(prod, 0.0) or 0.0)
+            effective_stock[pid][prod] = (init_val + purch_val) - cons_val
 
-    prod_info["weekly_total"] = (
-        float(math.ceil(row_sum)) if unit == "шт" else round(row_sum, 2)
-    )
+    matrix_data = {}
+    working_days_count = 0
 
-  if filter_period and filter_period != "ALL":
-    periodicities = load_all_nomenclature_periodicities()
-    filtered_matrix = {}
+    running_stock = {}
+    for pid, prods in effective_stock.items():
+        running_stock[pid] = prods.copy()
+
+    for day_obj, menu_num in target_days:
+        working_days_count += 1
+        d_str = day_obj.isoformat()
+        day_fact = fact_storage.get(d_str, {}).get(region, {})
+        day_staff_fact = fact_staff_storage.get(d_str, {}).get(region, {})
+        ttk_items = load_menu_from_excel(menu_num)
+        staff_ttk_items = load_staff_menu_from_excel(menu_num)
+
+        for point_id, point_info in points_dict.items():
+            val_ch = day_fact.get(str(point_id), day_fact.get(point_id))
+
+            if val_ch is None:
+                last_known_fact = None
+                for prev_d in sorted(fact_storage.keys(), reverse=True):
+                    if prev_d <= d_str and region in fact_storage[prev_d]:
+                        p_val = fact_storage[prev_d][region].get(str(point_id), fact_storage[prev_d][region].get(point_id))
+                        if p_val is not None:
+                            last_known_fact = int(p_val)
+                            break
+                children = last_known_fact if last_known_fact is not None else point_info["children_count"]
+            else:
+                children = int(val_ch)
+
+            for prod_name, data in ttk_items.items():
+                kg_per_child = data.get("qty_per_child", 0.0)
+                unit = data["unit"]
+                gross_needed = math.ceil(kg_per_child * children) if unit == "шт" else kg_per_child * children
+
+                if prod_name not in matrix_data:
+                    matrix_data[prod_name] = {
+                        "unit": unit,
+                        "points_qty": {pid: 0.0 for pid in points_dict.keys()},
+                        "weekly_total": 0.0
+                    }
+
+                point_stocks = running_stock.get(point_id, {})
+                available = 0.0
+                st_key_matched = None
+                for st_prod, st_val in point_stocks.items():
+                    if st_prod.strip().lower() == prod_name.strip().lower():
+                        available = st_val
+                        st_key_matched = st_prod
+                        break
+
+                if available >= gross_needed:
+                    net_needed = 0.0
+                    if st_key_matched:
+                        running_stock[point_id][st_key_matched] -= gross_needed
+                else:
+                    net_needed = gross_needed - available
+                    if st_key_matched:
+                        running_stock[point_id][st_key_matched] = 0.0
+
+                if unit == "шт":
+                    matrix_data[prod_name]["points_qty"][point_id] += float(math.ceil(net_needed))
+                else:
+                    matrix_data[prod_name]["points_qty"][point_id] += round(net_needed, 2)
+
+            val_st = day_staff_fact.get(str(point_id), day_staff_fact.get(point_id))
+            if val_st is None:
+                last_known_staff = 0
+                for prev_d in sorted(fact_staff_storage.keys(), reverse=True):
+                    if prev_d <= d_str and region in fact_staff_storage[prev_d]:
+                        p_val = fact_staff_storage[prev_d][region].get(str(point_id), fact_staff_storage[prev_d][region].get(point_id))
+                        if p_val is not None:
+                            last_known_staff = int(p_val)
+                            break
+                staff_cnt = last_known_staff
+            else:
+                staff_cnt = int(val_st)
+
+            if staff_cnt > 0:
+                for prod_name, data in staff_ttk_items.items():
+                    kg_per_staff = data.get("qty_per_staff", 0.0)
+                    unit = data["unit"]
+                    gross_needed = math.ceil(kg_per_staff * staff_cnt) if unit == "шт" else kg_per_staff * staff_cnt
+
+                    if prod_name not in matrix_data:
+                        matrix_data[prod_name] = {
+                            "unit": unit,
+                            "points_qty": {pid: 0.0 for pid in points_dict.keys()},
+                            "weekly_total": 0.0
+                        }
+
+                    point_stocks = running_stock.get(point_id, {})
+                    available = 0.0
+                    st_key_matched = None
+                    for st_prod, st_val in point_stocks.items():
+                        if st_prod.strip().lower() == prod_name.strip().lower():
+                            available = st_val
+                            st_key_matched = st_prod
+                            break
+
+                    if available >= gross_needed:
+                        net_needed = 0.0
+                        if st_key_matched:
+                            running_stock[point_id][st_key_matched] -= gross_needed
+                    else:
+                        net_needed = gross_needed - available
+                        if st_key_matched:
+                            running_stock[point_id][st_key_matched] = 0.0
+
+                    if unit == "шт":
+                        matrix_data[prod_name]["points_qty"][point_id] += float(math.ceil(net_needed))
+                    else:
+                        matrix_data[prod_name]["points_qty"][point_id] += round(net_needed, 2)
+
     for prod_name, prod_info in matrix_data.items():
-      prod_mapped_period = None
-      for p_key, p_val in periodicities.items():
-        if p_key.strip().lower() == prod_name.strip().lower():
-          prod_mapped_period = p_val
-          break
+        unit = prod_info["unit"]
+        row_sum = 0.0
+        for pid in points_dict.keys():
+            val = prod_info["points_qty"][pid]
+            val = float(math.ceil(val)) if unit == "шт" else round(val, 2)
+            prod_info["points_qty"][pid] = val
+            row_sum += val
 
-      if (
-          prod_mapped_period
-          and prod_mapped_period.lower() == filter_period.lower()
-      ):
-        filtered_matrix[prod_name] = prod_info
-    matrix_data = filtered_matrix
+        prod_info["weekly_total"] = float(math.ceil(row_sum)) if unit == "шт" else round(row_sum, 2)
 
-  return {
-      "week_start": week_start_str,
-      "week_end": week_end_str,
-      "region": region,
-      "inv_date": inv_date_used,
-      "working_days_count": working_days_count,
-      "points": points_list,
-      "matrix": matrix_data,
-  }
+    if filter_period and filter_period != "ALL":
+        periodicities = load_all_nomenclature_periodicities()
+        filtered_matrix = {}
+        for prod_name, prod_info in matrix_data.items():
+            prod_mapped_period = None
+            for p_key, p_val in periodicities.items():
+                if p_key.strip().lower() == prod_name.strip().lower():
+                    prod_mapped_period = p_val
+                    break
+
+            if prod_mapped_period and prod_mapped_period.lower() == filter_period.lower():
+                filtered_matrix[prod_name] = prod_info
+        matrix_data = filtered_matrix
+
+    return {
+        "week_start": week_start_str,
+        "week_end": week_end_str,
+        "region": region,
+        "inv_date": inv_date_used,
+        "working_days_count": working_days_count,
+        "points": points_list,
+        "matrix": matrix_data
+    }
 
 
 @app.get("/api/raznaryadka/export/excel")
-def export_raznaryadka_excel(
-    target_date: str,
-    region: str = "Город",
-    days_count: int = 2,
-    filter_period: str = "ALL",
-):
-  try:
-    data = get_matrix_raznaryadka(target_date, region, days_count, filter_period)
-  except Exception as e:
-    raise HTTPException(status_code=400, detail=f"Ошибка расчета данных: {str(e)}")
+def export_raznaryadka_excel(target_date: str, region: str = "Город", days_count: int = 2, filter_period: str = "ALL"):
+    try:
+        data = get_matrix_raznaryadka(target_date, region, days_count, filter_period)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Ошибка расчета данных: {str(e)}")
 
-  points = data.get("points", [])
-  matrix = data.get("matrix", {})
+    points = data.get("points", [])
+    matrix = data.get("matrix", {})
 
-  rows_data = []
-  for prod_name, prod_info in matrix.items():
-    row = {"Продукт": prod_name, "Ед. изм.": prod_info["unit"]}
-    for p in points:
-      row[p["name"]] = prod_info["points_qty"].get(p["id"], 0.0)
-    row["ИТОГО К ЗАКУПКЕ"] = prod_info["weekly_total"]
-    rows_data.append(row)
+    rows_data = []
+    for prod_name, prod_info in matrix.items():
+        row = {"Продукт": prod_name, "Ед. изм.": prod_info["unit"]}
+        for p in points:
+            row[p["name"]] = prod_info["points_qty"].get(p["id"], 0.0)
+        row["ИТОГО К ЗАКУПКЕ"] = prod_info["weekly_total"]
+        rows_data.append(row)
 
-  df = pd.DataFrame(rows_data)
-  if df.empty:
-    columns = (
-        ["Продукт", "Ед. изм."]
-        + [p["name"] for p in points]
-        + ["ИТОГО К ЗАКУПКЕ"]
+    df = pd.DataFrame(rows_data)
+    if df.empty:
+        columns = ["Продукт", "Ед. изм."] + [p["name"] for p in points] + ["ИТОГО К ЗАКУПКЕ"]
+        df = pd.DataFrame(columns=columns)
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Разнарядка")
+        _apply_excel_table_style(writer.sheets["Разнарядка"], df, col_width_mid=8.57, row_height_pt=23 * 0.75)
+
+    output.seek(0)
+    region_safe = "Gorod" if region == "Город" else "Rayon"
+    filename = f"Raznaryadka_{region_safe}_{target_date}_days_{days_count}.xlsx"
+
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
-    df = pd.DataFrame(columns=columns)
-
-  output = io.BytesIO()
-  with pd.ExcelWriter(output, engine="openpyxl") as writer:
-    df.to_excel(writer, index=False, sheet_name="Разнарядка")
-    _apply_excel_table_style(
-        writer.sheets["Разнарядка"],
-        df,
-        col_width_mid=8.57,
-        row_height_pt=23 * 0.75,
-    )
-
-  output.seek(0)
-  region_safe = "Gorod" if region == "Город" else "Rayon"
-  filename = f"Raznaryadka_{region_safe}_{target_date}_days_{days_count}.xlsx"
-
-  return StreamingResponse(
-      output,
-      media_type=(
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-      ),
-      headers={"Content-Disposition": f"attachment; filename={filename}"},
-  )
