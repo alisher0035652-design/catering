@@ -958,6 +958,18 @@ def get_dashboard():
                     </div>
                 </header>
 
+                <div class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row justify-between items-center border-l-4 border-purple-500">
+                    <div>
+                        <h3 class="font-bold text-gray-800 text-md">📊 Выгрузка отчетов за месяц (Сотрудники)</h3>
+                        <p class="text-xs text-gray-500 mt-0.5">Выберите месяц для формирования посещаемости сотрудников или детального расхода по МТТ</p>
+                    </div>
+                    <div class="mt-3 md:mt-0 flex items-center gap-3">
+                        <input type="month" id="staffMonthPicker" class="border border-gray-300 rounded-md px-3 py-2 text-sm">
+                        <button onclick="downloadStaffMatrixExcel()" class="bg-purple-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-purple-700 transition">📥 Скачать сотрудников</button>
+                        <button onclick="downloadStaffMonthlyMttExcel()" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-700 transition">📥 Скачать расход</button>
+                    </div>
+                </div>
+
                 <div id="staffFactContainer" class="space-y-6">
                     <p class="p-8 text-center text-gray-400 bg-white shadow rounded-lg">Загрузка данных...</p>
                 </div>
@@ -1100,6 +1112,7 @@ def get_dashboard():
             const yearStr = now.getFullYear();
             const monthStr = String(now.getMonth() + 1).padStart(2, '0');
             document.getElementById('childrenMonthPicker').value = `${yearStr}-${monthStr}`;
+            document.getElementById('staffMonthPicker').value = `${yearStr}-${monthStr}`;
 
             let viewYear = now.getFullYear();
             let viewMonth = now.getMonth();
@@ -1518,6 +1531,26 @@ def get_dashboard():
             function downloadStaffFactAllRegionsExcel() {
                 const dateVal = document.getElementById('staffFactDate').value;
                 window.location.href = `/api/fact-staff/export/all-regions-excel?report_date=${dateVal}`;
+            }
+
+            function downloadStaffMatrixExcel() {
+                const monthVal = document.getElementById('staffMonthPicker').value;
+                const region = document.getElementById('staffFactRegionSelect').value;
+                if (!monthVal) {
+                    alert('Пожалуйста, выберите месяц');
+                    return;
+                }
+                window.location.href = `/api/fact-staff/export/staff-matrix?month=${monthVal}&region=${region}`;
+            }
+
+            function downloadStaffMonthlyMttExcel() {
+                const monthVal = document.getElementById('staffMonthPicker').value;
+                const region = document.getElementById('staffFactRegionSelect').value;
+                if (!monthVal) {
+                    alert('Пожалуйста, выберите месяц');
+                    return;
+                }
+                window.location.href = `/api/fact-staff/export/monthly-mtt-excel?month=${monthVal}&region=${region}`;
             }
 
             async function sendStaffMenuTelegramManual() {
@@ -2458,6 +2491,176 @@ def export_fact_staff_all_regions_excel(report_date: str):
           )
       },
   )
+
+
+@app.get("/api/fact-staff/export/staff-matrix")
+def export_staff_matrix_excel(month: str, region: str = "Город"):
+  try:
+    parts = month.split("-")
+    year = int(parts[0])
+    m = int(parts[1])
+  except Exception:
+    raise HTTPException(
+        status_code=400,
+        detail="Неверный формат месяца. Используйте YYYY-MM",
+    )
+
+  start_date = date(year, m, 1)
+  if m == 12:
+    end_date = date(year + 1, 1, 1) - timedelta(days=1)
+  else:
+    end_date = date(year, m + 1, 1) - timedelta(days=1)
+
+  try:
+    points_dict = load_points_from_excel(region)
+    fact_storage = load_fact_staff_settings()
+
+    rows_data = []
+    current = start_date
+    while current <= end_date:
+      d_str = current.isoformat()
+      saved_day_fact = fact_storage.get(d_str, {}).get(region, {})
+
+      row = {"Дата": d_str}
+      for pid, pinfo in points_dict.items():
+        p_name = pinfo["name"]
+        val = saved_day_fact.get(str(pid))
+        if val is None:
+          val = saved_day_fact.get(pid, 0)
+
+        try:
+          num_val = int(float(val)) if val != "" and val is not None else 0
+        except Exception:
+          num_val = 0
+
+        row[p_name] = num_val
+
+      rows_data.append(row)
+      current += timedelta(days=1)
+
+    df = pd.DataFrame(rows_data)
+    if df.empty:
+      df = pd.DataFrame(columns=["Дата"])
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+      df.to_excel(
+          writer, index=False, sheet_name=f"Сотрудники_{region}_{month}"[:31]
+      )
+    output.seek(0)
+
+    region_safe = "Gorod" if region == "Город" else "Rayon"
+    filename = f"Staff_Attendance_{region_safe}_{month}.xlsx"
+
+    return StreamingResponse(
+        output,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+  except Exception as e:
+    print(f"❌ Ошибка в export_staff_matrix_excel: {e}")
+    raise HTTPException(
+        status_code=500, detail=f"Ошибка генерации файла: {str(e)}"
+    )
+
+
+@app.get("/api/fact-staff/export/monthly-mtt-excel")
+def export_staff_monthly_mtt_consumption_excel(
+    month: str, region: str = "Город"
+):
+  try:
+    parts = month.split("-")
+    year = int(parts[0])
+    m = int(parts[1])
+  except Exception:
+    raise HTTPException(
+        status_code=400,
+        detail="Неверный формат месяца. Используйте YYYY-MM",
+    )
+
+  start_date = date(year, m, 1)
+  if m == 12:
+    end_date = date(year + 1, 1, 1) - timedelta(days=1)
+  else:
+    end_date = date(year, m + 1, 1) - timedelta(days=1)
+
+  try:
+    points_dict = load_points_from_excel(region)
+    fact_storage = load_fact_staff_settings()
+
+    rows_data = []
+    current = start_date
+    while current <= end_date:
+      d_str = current.isoformat()
+      menu_num = get_menu_number_for_date_custom(current)
+
+      if menu_num is not None:
+        menu_items = load_staff_menu_from_excel(menu_num)
+        saved_day_fact = fact_storage.get(d_str, {}).get(region, {})
+
+        for pid, pinfo in points_dict.items():
+          p_name = pinfo["name"]
+          val = saved_day_fact.get(str(pid))
+          if val is None:
+            val = saved_day_fact.get(pid, 0)
+
+          try:
+            staff_cnt = int(float(val)) if val != "" and val is not None else 0
+          except Exception:
+            staff_cnt = 0
+
+          if staff_cnt > 0:
+            for prod_name, pdata in menu_items.items():
+              kg_per_staff = pdata.get("qty_per_staff", 0.0)
+              unit = pdata.get("unit", "кг")
+              raw_val = kg_per_staff * staff_cnt
+
+              if unit == "шт":
+                qty = float(math.ceil(raw_val))
+              else:
+                qty = round(raw_val, 2)
+
+              if qty > 0:
+                rows_data.append({
+                    "Дата": d_str,
+                    "МТТ": p_name,
+                    "Номенклатура": prod_name,
+                    "ед. изм.": unit,
+                    "кол-во": qty,
+                })
+
+      current += timedelta(days=1)
+
+    df = pd.DataFrame(rows_data)
+    if df.empty:
+      df = pd.DataFrame(
+          columns=["Дата", "МТТ", "Номенклатура", "ед. изм.", "кол-во"]
+      )
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+      df.to_excel(
+          writer, index=False, sheet_name=f"Расход_сотр_{month}"[:31]
+      )
+    output.seek(0)
+
+    region_safe = "Gorod" if region == "Город" else "Rayon"
+    filename = f"Monthly_Staff_Consumption_MTT_{region_safe}_{month}.xlsx"
+
+    return StreamingResponse(
+        output,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+  except Exception as e:
+    print(f"❌ Ошибка в export_staff_monthly_mtt_consumption_excel: {e}")
+    raise HTTPException(
+        status_code=500, detail=f"Ошибка генерации файла: {str(e)}"
+    )
 
 
 @app.get("/api/fact/export/children-matrix")
