@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Response
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 import pandas as pd
@@ -7,8 +7,12 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 import os
 import io
 import json
+import base64
+import hmac
 import math
 import re
+import time
+from collections import OrderedDict
 from datetime import date, timedelta, datetime
 import requests
 import asyncio
@@ -20,15 +24,97 @@ import psycopg2
 import psycopg2.extras
 from apscheduler.schedulers.background import BackgroundScheduler
 
-app = FastAPI(title="Catering Management API", version="1.1.0")
+_ENABLE_DOCS = os.environ.get("ENABLE_DOCS") == "1"
+app = FastAPI(
+    title="Catering Management API",
+    version="1.1.0",
+    docs_url="/docs" if _ENABLE_DOCS else None,        # публичная карта API не нужна
+    redoc_url="/redoc" if _ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if _ENABLE_DOCS else None,
+)
+
+# Пароль на весь сайт (браузер сам покажет окно логина). Включается переменной APP_PASSWORD.
+APP_USER = os.environ.get("APP_USER", "admin")
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
+
+
+def _basic_auth_ok(header_value) -> bool:
+    if not APP_PASSWORD:
+        return True
+    if not header_value or not header_value.startswith("Basic "):
+        return False
+    try:
+        decoded = base64.b64decode(header_value[6:]).decode("utf-8")
+    except Exception:
+        return False
+    user, _, pwd = decoded.partition(":")
+    ok_user = hmac.compare_digest(user.encode("utf-8"), APP_USER.encode("utf-8"))
+    ok_pwd = hmac.compare_digest(pwd.encode("utf-8"), APP_PASSWORD.encode("utf-8"))
+    return ok_user and ok_pwd
+
+
+@app.middleware("http")
+async def security_middleware(request, call_next):
+    # HEAD / оставляем открытым: так работают проверки живости сервиса (Render, UptimeRobot)
+    is_ping = request.method in ("HEAD", "OPTIONS") and request.url.path == "/"
+    if not is_ping and not _basic_auth_ok(request.headers.get("authorization")):
+        return Response(
+            content="Требуется авторизация",
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="Catering"'},
+        )
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "same-origin"
+    return response
 
 _MENU_CACHE = {}
 _STAFF_MENU_CACHE = {}
 
+# Единицы «штуки»: если норма яиц в Excel уже указана в штуках, делить на 55 не нужно
+_PIECE_UNITS = ("шт", "шт.", "штук", "штуки", "дона")
+
+
+_VALID_REGIONS = ("Город", "Район")
+_SAFE_PRODUCT_NAME_RE = re.compile(r"^[\w\s\-.,()/%№+:;]{1,100}$")
+_MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+
+def _check_region(region: str) -> str:
+    if region not in _VALID_REGIONS:
+        raise HTTPException(status_code=400, detail="Неизвестный регион")
+    return region
+
+
+def _check_iso_date(value: str) -> str:
+    """Дата строго в виде YYYY-MM-DD (иначе 400); защита закрытых месяцев не обходится форматом."""
+    try:
+        return date.fromisoformat(str(value).strip()).isoformat()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Неверный формат даты (ожидается YYYY-MM-DD)")
+
+
+def _is_safe_product_name(name) -> bool:
+    """Название продукта, которого нет в меню, показываем в отчёте только если в нём нет HTML-символов."""
+    return isinstance(name, str) and bool(_SAFE_PRODUCT_NAME_RE.match(name))
+
+
+def _scrub_secrets(text: str) -> str:
+    if TELEGRAM_BOT_TOKEN:
+        text = text.replace(TELEGRAM_BOT_TOKEN, "***")
+    return text
+
+
+def _ceil_pieces(x: float) -> int:
+    """Округление вверх до целых штук. Сначала округляем до 6 знаков, чтобы ошибка
+    двоичной арифметики (например 63.0000000000001) не добавляла лишнюю штуку."""
+    return math.ceil(round(x, 6))
+
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TELEGRAM_ADMIN_CHAT_ID = os.environ.get("TELEGRAM_ADMIN_CHAT_ID", "")
-MONTH_CLOSE_PASSWORD = os.environ.get("MONTH_CLOSE_PASSWORD", "close2026")
+MONTH_CLOSE_PASSWORD = os.environ.get("MONTH_CLOSE_PASSWORD", "")  # без переменной закрытие месяца отключено
 
 
 class CloseMonthRequest(BaseModel):
@@ -134,7 +220,23 @@ def is_month_closed(date_str: str, region: str) -> bool:
         return False
 
 
+# Снимок закрытого месяца после закрытия не меняется, поэтому его можно держать в памяти.
+# Без кэша каждый день отчёта заново читал из БД и разбирал весь снимок месяца (~1 МБ).
+_SNAPSHOT_CACHE = OrderedDict()   # (месяц, регион) -> снимок; хранится не больше _SNAPSHOT_CACHE_MAX месяцев
+_SNAPSHOT_CACHE_MAX = 4
+_SNAPSHOT_OPEN_CACHE = {}         # (месяц, регион) -> время проверки «месяц не закрыт»
+_SNAPSHOT_OPEN_TTL = 20.0         # секунд; закрытие через этот сервер сбрасывает значение сразу
+
+
 def get_closed_month_snapshot(month_str: str, region: str) -> dict | None:
+    key = (month_str, region)
+    cached = _SNAPSHOT_CACHE.get(key)
+    if cached is not None:
+        _SNAPSHOT_CACHE.move_to_end(key)
+        return cached
+    checked_at = _SNAPSHOT_OPEN_CACHE.get(key)
+    if checked_at is not None and time.time() - checked_at < _SNAPSHOT_OPEN_TTL:
+        return None
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -147,7 +249,12 @@ def get_closed_month_snapshot(month_str: str, region: str) -> dict | None:
             raw_snap = row["snapshot"]
             snap = raw_snap if isinstance(raw_snap, dict) else json.loads(raw_snap)
             snap["closed_at"] = row["closed_at"]
+            _SNAPSHOT_OPEN_CACHE.pop(key, None)
+            _SNAPSHOT_CACHE[key] = snap
+            while len(_SNAPSHOT_CACHE) > _SNAPSHOT_CACHE_MAX:
+                _SNAPSHOT_CACHE.popitem(last=False)
             return snap
+        _SNAPSHOT_OPEN_CACHE[key] = time.time()
     except Exception as e:
         print(f"Ошибка чтения снимка закрытого месяца: {e}")
     return None
@@ -170,7 +277,15 @@ def assert_month_open(date_str: str, region: str):
         )
 
 
+_CALENDAR_CACHE = {"json": None, "ts": 0.0}   # настройки календаря как JSON-текст
+_CALENDAR_CACHE_TTL = 10.0                    # секунд; сохранение через этот сервер сбрасывает кэш сразу
+
+
 def load_manual_settings() -> dict:
+    # Отчёты вызывают эту функцию на каждый день периода. Кэшируем текст JSON и каждый раз
+    # разбираем заново, чтобы вызывающий код мог менять полученный словарь, не портя кэш.
+    if _CALENDAR_CACHE["json"] is not None and time.time() - _CALENDAR_CACHE["ts"] < _CALENDAR_CACHE_TTL:
+        return json.loads(_CALENDAR_CACHE["json"])
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -180,7 +295,12 @@ def load_manual_settings() -> dict:
         cursor.close()
         conn.close()
         if row:
-            return row["data"] if isinstance(row["data"], dict) else json.loads(row["data"])
+            data = row["data"] if isinstance(row["data"], dict) else json.loads(row["data"])
+        else:
+            data = {"days": {}}
+        _CALENDAR_CACHE["json"] = json.dumps(data, ensure_ascii=False)
+        _CALENDAR_CACHE["ts"] = time.time()
+        return data
     except Exception as e:
         print(f"Ошибка загрузки календаря из БД: {e}")
     return {"days": {}}
@@ -204,6 +324,7 @@ def save_manual_settings(settings: dict):
         conn.commit()
         cursor.close()
         conn.close()
+        _CALENDAR_CACHE["json"] = None
     except Exception as e:
         print(f"Ошибка сохранения календаря в БД: {e}")
 
@@ -515,7 +636,7 @@ def load_menu_from_excel(menu_num: int) -> dict:
             unit = str(row.iloc[2]).strip().lower() if len(row) > 2 and pd.notna(row.iloc[2]) else "граммов"
 
             if "тухум" in prod_name.lower() or "яйц" in prod_name.lower():
-                qty_in_units = val / 55.0
+                qty_in_units = val if unit in _PIECE_UNITS else val / 55.0  # граммы -> штуки (55 г = 1 шт)
                 display_unit = "шт"
                 menu_items[prod_name] = {"qty_per_child": qty_in_units, "unit": display_unit}
             elif "грам" in unit or "гр" in unit:
@@ -548,7 +669,7 @@ def load_staff_menu_from_excel(menu_num: int) -> dict:
             unit = str(row.iloc[2]).strip().lower() if len(row) > 2 and pd.notna(row.iloc[2]) else "граммов"
 
             if "тухум" in prod_name.lower() or "яйц" in prod_name.lower():
-                qty_in_units = val / 55.0
+                qty_in_units = val if unit in _PIECE_UNITS else val / 55.0  # граммы -> штуки (55 г = 1 шт)
                 display_unit = "шт"
                 menu_items[prod_name] = {"qty_per_staff": qty_in_units, "unit": display_unit}
             elif "грам" in unit or "гр" in unit:
@@ -591,6 +712,9 @@ def get_all_products_with_units() -> dict:
     return dict(sorted(products.items()))
 
 
+_CLOSED_UNITS_CACHE = {}  # (месяц, регион) -> {продукт: единица}; снимок закрытого месяца не меняется
+
+
 def get_closed_units_map(region: str) -> dict:
     """Единицы измерения продуктов из снимков закрытых месяцев.
 
@@ -603,28 +727,49 @@ def get_closed_units_map(region: str) -> dict:
         cursor = conn.cursor()
         ph = "%s" if _is_postgres(conn) else "?"
         cursor.execute(
-            f"SELECT snapshot FROM closed_months WHERE region = {ph} ORDER BY month_str DESC;",
+            f"SELECT month_str FROM closed_months WHERE region = {ph} ORDER BY month_str DESC;",
             (region,),
         )
-        rows = cursor.fetchall()
+        months = [str(r["month_str"]) for r in cursor.fetchall()]
+
+        for month_str in months:
+            cache_key = (month_str, region)
+            if cache_key not in _CLOSED_UNITS_CACHE:
+                cursor.execute(
+                    f"SELECT snapshot FROM closed_months WHERE month_str = {ph} AND region = {ph};",
+                    (month_str, region),
+                )
+                row = cursor.fetchone()
+                month_units = {}
+                if row:
+                    raw = row["snapshot"]
+                    snap = raw if isinstance(raw, dict) else json.loads(raw)
+                    for day in snap.get("days", {}).values():
+                        for key in ("children_consumption", "staff_consumption"):
+                            for prod_name, pdata in day.get(key, {}).items():
+                                if prod_name not in month_units:
+                                    month_units[prod_name] = pdata.get("unit", "кг")
+                _CLOSED_UNITS_CACHE[cache_key] = month_units
+            # месяцы идут от новых к старым: единица из более свежего месяца приоритетнее
+            for prod_name, unit in _CLOSED_UNITS_CACHE[cache_key].items():
+                if prod_name not in units:
+                    units[prod_name] = unit
+
         cursor.close()
         conn.close()
     except Exception as e:
         print(f"Ошибка чтения единиц из снимков закрытых месяцев: {e}")
-        return units
-
-    for r in rows:
-        try:
-            raw = r["snapshot"]
-            snap = raw if isinstance(raw, dict) else json.loads(raw)
-        except Exception:
-            continue
-        for day in snap.get("days", {}).values():
-            for key in ("children_consumption", "staff_consumption"):
-                for prod_name, pdata in day.get(key, {}).items():
-                    if prod_name not in units:
-                        units[prod_name] = pdata.get("unit", "кг")
     return units
+
+
+def _safe_float_or_zero(val) -> float:
+    """Число из значения акта: None, пустая строка, '5,5' и мусор не должны ронять отчёт."""
+    if val is None or val == "":
+        return 0.0
+    try:
+        return float(str(val).replace(",", ".").strip())
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _safe_int_or_zero(val) -> int:
@@ -682,13 +827,13 @@ def _close_single_month(month: str, region: str) -> dict:
                 total_q = 0.0
                 for pid in points_dict.keys():
                     cnt = children_counts[str(pid)]
-                    q = float(math.ceil(cnt * q_per)) if unit == "шт" else round(cnt * q_per, 2)
+                    q = float(_ceil_pieces(cnt * q_per)) if unit == "шт" else round(cnt * q_per, 2)
                     pts_q[str(pid)] = q
                     total_q += q
                 children_consumption[prod_name] = {
                     "unit": unit,
                     "points_qty": pts_q,
-                    "total": float(math.ceil(total_q)) if unit == "шт" else round(total_q, 2)
+                    "total": float(_ceil_pieces(total_q)) if unit == "шт" else round(total_q, 2)
                 }
 
             menu_st = load_staff_menu_from_excel(menu_num)
@@ -699,13 +844,13 @@ def _close_single_month(month: str, region: str) -> dict:
                 total_q = 0.0
                 for pid in points_dict.keys():
                     cnt = staff_counts[str(pid)]
-                    q = float(math.ceil(cnt * q_per)) if unit == "шт" else round(cnt * q_per, 2)
+                    q = float(_ceil_pieces(cnt * q_per)) if unit == "шт" else round(cnt * q_per, 2)
                     pts_q[str(pid)] = q
                     total_q += q
                 staff_consumption[prod_name] = {
                     "unit": unit,
                     "points_qty": pts_q,
-                    "total": float(math.ceil(total_q)) if unit == "шт" else round(total_q, 2)
+                    "total": float(_ceil_pieces(total_q)) if unit == "шт" else round(total_q, 2)
                 }
 
         days_snapshot[d_str] = {
@@ -743,6 +888,7 @@ def _close_single_month(month: str, region: str) -> dict:
     conn.commit()
     cursor.close()
     conn.close()
+    _SNAPSHOT_OPEN_CACHE.pop((month, region), None)
 
     return {
         "month": month,
@@ -798,7 +944,7 @@ def generate_menu_pdf_for_point(report_date_str: str, region: str, point_id: int
     wb.save(temp_excel_path)
     wb.close()
 
-    subprocess.run(["libreoffice", "--headless", "--convert-to", "pdf", temp_excel_path, "--outdir", "."], check=True)
+    subprocess.run(["libreoffice", "--headless", "--convert-to", "pdf", temp_excel_path, "--outdir", "."], check=True, timeout=180)
 
     generated_pdf = temp_excel_path.replace(".xlsx", ".pdf")
     if os.path.exists(generated_pdf):
@@ -857,7 +1003,7 @@ def generate_staff_menu_pdf_for_point(report_date_str: str, region: str, point_i
     wb.save(temp_excel_path)
     wb.close()
 
-    subprocess.run(["libreoffice", "--headless", "--convert-to", "pdf", temp_excel_path, "--outdir", "."], check=True)
+    subprocess.run(["libreoffice", "--headless", "--convert-to", "pdf", temp_excel_path, "--outdir", "."], check=True, timeout=180)
 
     generated_pdf = temp_excel_path.replace(".xlsx", ".pdf")
     if os.path.exists(generated_pdf):
@@ -881,7 +1027,7 @@ def send_pdf_to_telegram(pdf_path: str, caption: str):
         with open(pdf_path, "rb") as f:
             files = {"document": f}
             data = {"chat_id": target_chat_id, "caption": caption}
-            response = requests.post(url, data=data, files=files)
+            response = requests.post(url, data=data, files=files, timeout=60)
         res_json = response.json()
         if not res_json.get("ok"):
             print(f"❌ ОШИБКА от Telegram API для файла {pdf_path}: {res_json}")
@@ -889,7 +1035,7 @@ def send_pdf_to_telegram(pdf_path: str, caption: str):
             print(f"✅ Успешно отправлено в Telegram: {pdf_path}")
         return res_json
     except Exception as e:
-        print(f"❌ Исключение при отправке в Telegram файла {pdf_path}: {e}")
+        print(f"❌ Исключение при отправке в Telegram файла {pdf_path}: {_scrub_secrets(str(e))}")
         return None
 
 
@@ -1294,6 +1440,11 @@ def get_dashboard():
         </div>
 
         <script>
+            function esc(v) {
+                return String(v === null || v === undefined ? '' : v).replace(/[&<>"']/g, function (c) {
+                    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+                });
+            }
             const SHIPPING_SERVICE_URL = "https://muxsin-fayz.onrender.com";
             let currentMatrixData = null;
 
@@ -1474,7 +1625,7 @@ def get_dashboard():
                         const childVal = data.fact_children[p.id] !== undefined ? data.fact_children[p.id] : p.default_children;
                         html += `
                             <div class="bg-gray-50 p-2.5 border rounded-md text-center">
-                                <div class="text-xs font-bold text-gray-700 truncate" title="${p.name}">${p.name}</div>
+                                <div class="text-xs font-bold text-gray-700 truncate" title="${esc(p.name)}">${esc(p.name)}</div>
                                 <div class="text-[10px] text-gray-400 mb-1">(План: ${p.plan_children !== undefined ? p.plan_children : p.default_children})</div>
                                 <input type="number" ${isClosed ? 'disabled' : ''} data-point-fact="${p.id}" value="${childVal}" class="fact-child-cell border border-gray-300 rounded px-2 py-1 text-center text-sm w-full font-bold text-green-700 focus:ring-2 focus:ring-green-500 disabled:bg-gray-200 disabled:text-gray-500">
                             </div>
@@ -1501,7 +1652,7 @@ def get_dashboard():
 
                         data.points.forEach(p => {
                             const childVal = data.fact_children[p.id] !== undefined ? data.fact_children[p.id] : p.default_children;
-                            html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]">${p.name}<br><span class="text-[10px] text-green-600">(${childVal} факт)</span></th>`;
+                            html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]">${esc(p.name)}<br><span class="text-[10px] text-green-600">(${childVal} факт)</span></th>`;
                         });
 
                         html += `<th class="px-4 py-3 text-center font-bold text-green-800 bg-green-50">ИТОГО ФАКТ</th></tr></thead><tbody class="divide-y divide-gray-200 bg-white">`;
@@ -1509,8 +1660,8 @@ def get_dashboard():
                         for (const [prodName, rowData] of Object.entries(data.fact_consumption)) {
                             html += `
                                 <tr class="hover:bg-gray-50">
-                                    <td class="px-4 py-3 font-medium text-gray-900 border-r bg-white sticky left-0 z-10">${prodName}</td>
-                                    <td class="px-3 py-3 text-center text-gray-500 border-r bg-gray-50">${rowData.unit}</td>
+                                    <td class="px-4 py-3 font-medium text-gray-900 border-r bg-white sticky left-0 z-10">${esc(prodName)}</td>
+                                    <td class="px-3 py-3 text-center text-gray-500 border-r bg-gray-50">${esc(rowData.unit)}</td>
                             `;
                             data.points.forEach(p => {
                                 const val = rowData.points_qty[p.id] || 0;
@@ -1626,7 +1777,7 @@ def get_dashboard():
                         const staffVal = data.fact_staff[p.id] !== undefined ? data.fact_staff[p.id] : p.default_staff;
                         html += `
                             <div class="bg-gray-50 p-2.5 border rounded-md text-center">
-                                <div class="text-xs font-bold text-gray-700 truncate mb-1" title="${p.name}">${p.name}</div>
+                                <div class="text-xs font-bold text-gray-700 truncate mb-1" title="${esc(p.name)}">${esc(p.name)}</div>
                                 <input type="number" ${isClosed ? 'disabled' : ''} data-point-staff-fact="${p.id}" value="${staffVal}" class="fact-staff-cell border border-gray-300 rounded px-2 py-1 text-center text-sm w-full font-bold text-blue-700 focus:ring-2 focus:ring-blue-500 disabled:bg-gray-200 disabled:text-gray-500">
                             </div>
                         `;
@@ -1652,7 +1803,7 @@ def get_dashboard():
 
                         data.points.forEach(p => {
                             const staffVal = data.fact_staff[p.id] !== undefined ? data.fact_staff[p.id] : p.default_staff;
-                            html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]">${p.name}<br><span class="text-[10px] text-blue-600">(${staffVal} сотр)</span></th>`;
+                            html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]">${esc(p.name)}<br><span class="text-[10px] text-blue-600">(${staffVal} сотр)</span></th>`;
                         });
 
                         html += `<th class="px-4 py-3 text-center font-bold text-blue-800 bg-blue-50">ИТОГО ФАКТ</th></tr></thead><tbody class="divide-y divide-gray-200 bg-white">`;
@@ -1660,8 +1811,8 @@ def get_dashboard():
                         for (const [prodName, rowData] of Object.entries(data.fact_consumption)) {
                             html += `
                                 <tr class="hover:bg-gray-50">
-                                    <td class="px-4 py-3 font-medium text-gray-900 border-r bg-white sticky left-0 z-10">${prodName}</td>
-                                    <td class="px-3 py-3 text-center text-gray-500 border-r bg-gray-50">${rowData.unit}</td>
+                                    <td class="px-4 py-3 font-medium text-gray-900 border-r bg-white sticky left-0 z-10">${esc(prodName)}</td>
+                                    <td class="px-3 py-3 text-center text-gray-500 border-r bg-gray-50">${esc(rowData.unit)}</td>
                             `;
                             data.points.forEach(p => {
                                 const val = rowData.points_qty[p.id] || 0;
@@ -1826,7 +1977,7 @@ def get_dashboard():
                     let html = `
                         <div class="bg-white shadow rounded-lg overflow-hidden">
                             <div class="bg-gray-50 px-6 py-4 border-b border-gray-200 flex justify-between items-center">
-                                <h3 class="text-lg font-bold text-gray-800">📦 Остатки на ${data.date} (Регион: ${data.region})</h3>
+                                <h3 class="text-lg font-bold text-gray-800">📦 Остатки на ${data.date} (Регион: ${esc(data.region)})</h3>
                                 <span class="text-xs text-gray-500 bg-gray-200 px-3 py-1 rounded">Инв. база: ${data.inv_date ? data.inv_date : 'Нет актов'}</span>
                             </div>
                             <div class="overflow-x-auto" style="max-height: 700px;">
@@ -1839,7 +1990,7 @@ def get_dashboard():
 
                     data.points.forEach(p => {
                         const countDisplay = p.is_saved ? `${p.children_count} дет` : `<span class="text-red-600 font-extrabold text-sm" title="Факт не сохранен (План)">П</span>`;
-                        html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]">${p.name}<br><span class="text-[10px] text-indigo-600">(${countDisplay})</span></th>`;
+                        html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]">${esc(p.name)}<br><span class="text-[10px] text-indigo-600">(${countDisplay})</span></th>`;
                     });
 
                     html += `<th class="px-4 py-3 text-center font-bold text-indigo-800 bg-indigo-50">ИТОГО ОСТАТОК</th></tr></thead><tbody class="divide-y divide-gray-200 bg-white">`;
@@ -1847,8 +1998,8 @@ def get_dashboard():
                     for (const [prodName, rowData] of Object.entries(data.balance_report)) {
                         html += `
                             <tr class="hover:bg-gray-50">
-                                <td class="px-4 py-3 font-medium text-gray-900 border-r bg-white sticky left-0 z-10">${prodName}</td>
-                                <td class="px-3 py-3 text-center text-gray-500 border-r bg-gray-50">${rowData.unit}</td>
+                                <td class="px-4 py-3 font-medium text-gray-900 border-r bg-white sticky left-0 z-10">${esc(prodName)}</td>
+                                <td class="px-3 py-3 text-center text-gray-500 border-r bg-gray-50">${esc(rowData.unit)}</td>
                         `;
                         data.points.forEach(p => {
                             const val = rowData.points_balance[p.id] || 0;
@@ -1907,21 +2058,21 @@ def get_dashboard():
                                 <th class="px-3 py-3 text-center font-bold text-gray-700 border-r bg-gray-100 min-w-[70px]">Ед.</th>
                 `;
                 data.points.forEach(p => {
-                    html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]">${p.name}<br><span class="text-[10px] text-blue-600">(${p.children_count} дет)</span></th>`;
+                    html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]">${esc(p.name)}<br><span class="text-[10px] text-blue-600">(${p.children_count} дет)</span></th>`;
                 });
                 html += `</tr></thead><tbody class="divide-y divide-gray-200 bg-white">`;
 
                 for (const [prodName, pInfo] of Object.entries(data.products)) {
                     html += `
                         <tr class="hover:bg-gray-50">
-                            <td class="px-4 py-2 font-medium text-gray-900 border-r bg-white sticky left-0 z-10">${prodName}</td>
-                            <td class="px-3 py-2 text-center text-gray-500 border-r bg-gray-50">${pInfo.unit}</td>
+                            <td class="px-4 py-2 font-medium text-gray-900 border-r bg-white sticky left-0 z-10">${esc(prodName)}</td>
+                            <td class="px-3 py-2 text-center text-gray-500 border-r bg-gray-50">${esc(pInfo.unit)}</td>
                     `;
                     data.points.forEach(p => {
                         const val = pInfo.points_stock[p.id] || 0;
                         html += `
                             <td class="px-2 py-1.5 text-center border-r">
-                                <input type="number" step="0.01" data-point="${p.id}" data-product="${prodName}" value="${val}" class="stock-cell border border-gray-200 rounded px-1.5 py-1 text-center text-xs w-20 focus:ring-2 focus:ring-blue-500">
+                                <input type="number" step="0.01" data-point="${p.id}" data-product="${esc(prodName)}" value="${val}" class="stock-cell border border-gray-200 rounded px-1.5 py-1 text-center text-xs w-20 focus:ring-2 focus:ring-blue-500">
                             </td>
                         `;
                     });
@@ -2021,14 +2172,14 @@ def get_dashboard():
                 const allClosed = statuses.every(s => s.is_closed);
                 if (allClosed) {
                     box.className = "mt-4 p-4 rounded-md bg-amber-50 border border-amber-300 text-sm text-amber-900 font-medium";
-                    box.innerHTML = statuses.map(s => `🔒 <b>${s.month} (${s.region})</b>: Закрыт навсегда (${s.closed_at || 'дата зафиксирована'}, дней в снимке: ${s.days_count})`).join('<br>');
+                    box.innerHTML = statuses.map(s => `🔒 <b>${esc(s.month)} (${esc(s.region)})</b>: Закрыт навсегда (${esc(s.closed_at || 'дата зафиксирована')}, дней в снимке: ${s.days_count})`).join('<br>');
                     btn.disabled = true;
                     btn.className = "bg-gray-400 text-white px-4 py-2 rounded-md text-sm font-bold cursor-not-allowed w-full";
                 } else {
                     box.className = "mt-4 p-4 rounded-md bg-emerald-50 border border-emerald-300 text-sm text-emerald-900";
                     box.innerHTML = statuses.map(s => s.is_closed
-                        ? `🔒 <b>${s.month} (${s.region})</b>: Уже закрыт (${s.closed_at})`
-                        : `🟢 <b>${s.month} (${s.region})</b>: Открыт для редактирования. Пустые/нулевые дни по МТТ будут зафиксированы как <b>0</b>.`
+                        ? `🔒 <b>${esc(s.month)} (${esc(s.region)})</b>: Уже закрыт (${esc(s.closed_at)})`
+                        : `🟢 <b>${esc(s.month)} (${esc(s.region)})</b>: Открыт для редактирования. Пустые/нулевые дни по МТТ будут зафиксированы как <b>0</b>.`
                     ).join('<br>');
                     btn.disabled = false;
                     btn.className = "bg-amber-600 text-white px-4 py-2 rounded-md text-sm font-bold hover:bg-amber-700 transition w-full";
@@ -2073,15 +2224,15 @@ def get_dashboard():
 
                 tbody.innerHTML = items.map(it => `
                     <tr class="hover:bg-gray-50">
-                        <td class="px-4 py-3 font-bold text-gray-800">${it.month}</td>
-                        <td class="px-4 py-3 text-center text-gray-700">${it.region}</td>
+                        <td class="px-4 py-3 font-bold text-gray-800">${esc(it.month)}</td>
+                        <td class="px-4 py-3 text-center text-gray-700">${esc(it.region)}</td>
                         <td class="px-4 py-3 text-center"><span class="bg-amber-100 text-amber-900 px-2.5 py-1 rounded-full text-xs font-bold">🔒 Закрыт</span></td>
-                        <td class="px-4 py-3 text-center text-xs text-gray-500">${it.closed_at || ''}</td>
+                        <td class="px-4 py-3 text-center text-xs text-gray-500">${esc(it.closed_at || '')}</td>
                         <td class="px-4 py-3 text-right space-x-2">
-                            <a href="/api/fact/export/children-matrix?month=${it.month}&region=${encodeURIComponent(it.region)}" class="inline-block bg-purple-600 text-white px-2.5 py-1 rounded text-xs font-medium hover:bg-purple-700">Дети</a>
-                            <a href="/api/fact/export/monthly-mtt-excel?month=${it.month}&region=${encodeURIComponent(it.region)}" class="inline-block bg-blue-600 text-white px-2.5 py-1 rounded text-xs font-medium hover:bg-blue-700">Расход дети</a>
-                            <a href="/api/fact-staff/export/staff-matrix?month=${it.month}&region=${encodeURIComponent(it.region)}" class="inline-block bg-indigo-600 text-white px-2.5 py-1 rounded text-xs font-medium hover:bg-indigo-700">Сотрудники</a>
-                            <a href="/api/fact-staff/export/monthly-mtt-excel?month=${it.month}&region=${encodeURIComponent(it.region)}" class="inline-block bg-emerald-600 text-white px-2.5 py-1 rounded text-xs font-medium hover:bg-emerald-700">Расход сотр.</a>
+                            <a href="/api/fact/export/children-matrix?month=${esc(it.month)}&region=${encodeURIComponent(it.region)}" class="inline-block bg-purple-600 text-white px-2.5 py-1 rounded text-xs font-medium hover:bg-purple-700">Дети</a>
+                            <a href="/api/fact/export/monthly-mtt-excel?month=${esc(it.month)}&region=${encodeURIComponent(it.region)}" class="inline-block bg-blue-600 text-white px-2.5 py-1 rounded text-xs font-medium hover:bg-blue-700">Расход дети</a>
+                            <a href="/api/fact-staff/export/staff-matrix?month=${esc(it.month)}&region=${encodeURIComponent(it.region)}" class="inline-block bg-indigo-600 text-white px-2.5 py-1 rounded text-xs font-medium hover:bg-indigo-700">Сотрудники</a>
+                            <a href="/api/fact-staff/export/monthly-mtt-excel?month=${esc(it.month)}&region=${encodeURIComponent(it.region)}" class="inline-block bg-emerald-600 text-white px-2.5 py-1 rounded text-xs font-medium hover:bg-emerald-700">Расход сотр.</a>
                         </td>
                     </tr>
                 `).join('');
@@ -2132,15 +2283,15 @@ def get_dashboard():
                                             <th class="px-3 py-3 text-center font-bold text-gray-700 border-r bg-gray-100 min-w-[70px]">Ед.</th>
                     `;
                     data.points.forEach(point => {
-                        html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]">${point.name}<br><span class="text-[10px] text-blue-600">(по факту)</span></th>`;
+                        html += `<th class="px-3 py-3 text-center font-medium text-gray-700 border-r min-w-[90px]">${esc(point.name)}<br><span class="text-[10px] text-blue-600">(по факту)</span></th>`;
                     });
                     html += `<th class="px-4 py-3 text-center font-bold text-blue-800 bg-blue-50">ИТОГО К ЗАКУПКЕ</th></tr></thead><tbody class="divide-y divide-gray-200 bg-white">`;
 
                     for (const [prodName, rowData] of Object.entries(data.matrix)) {
                         html += `
                             <tr class="hover:bg-gray-50">
-                                <td class="px-4 py-3 font-medium text-gray-900 border-r bg-white sticky left-0 z-10">${prodName}</td>
-                                <td class="px-3 py-3 text-center text-gray-500 border-r bg-gray-50">${rowData.unit}</td>
+                                <td class="px-4 py-3 font-medium text-gray-900 border-r bg-white sticky left-0 z-10">${esc(prodName)}</td>
+                                <td class="px-3 py-3 text-center text-gray-500 border-r bg-gray-50">${esc(rowData.unit)}</td>
                         `;
                         data.points.forEach(point => {
                             const val = rowData.points_qty[point.id] || 0;
@@ -2153,7 +2304,7 @@ def get_dashboard():
 
                     const mttSelect = document.getElementById('createDraftMttSelect');
                     if (mttSelect && data.points) {
-                        mttSelect.innerHTML = data.points.map(p => `<option value="${p.id}" data-name="${p.name}">${p.name}</option>`).join('');
+                        mttSelect.innerHTML = data.points.map(p => `<option value="${p.id}" data-name="${esc(p.name)}">${esc(p.name)}</option>`).join('');
                     }
                 } catch (err) {
                     container.innerHTML = '<div class="text-center py-12 text-red-500">Ошибка загрузки матрицы.</div>';
@@ -2246,10 +2397,28 @@ def list_closed_months_api():
         return []
 
 
+_CLOSE_FAILS = []          # время неудачных попыток ввода пароля
+_CLOSE_MAX_FAILS = 5
+_CLOSE_WINDOW = 600.0      # секунд
+
+
 @app.post("/api/month-close/close")
 def close_month_api(req: CloseMonthRequest):
-    if req.password != MONTH_CLOSE_PASSWORD:
+    if not MONTH_CLOSE_PASSWORD:
+        raise HTTPException(status_code=503, detail="Закрытие месяца отключено: на сервере не задана переменная MONTH_CLOSE_PASSWORD")
+    now = time.time()
+    _CLOSE_FAILS[:] = [t for t in _CLOSE_FAILS if now - t < _CLOSE_WINDOW]
+    if len(_CLOSE_FAILS) >= _CLOSE_MAX_FAILS:
+        raise HTTPException(status_code=429, detail="Слишком много неверных попыток. Повторите через несколько минут")
+    if not hmac.compare_digest(str(req.password).encode("utf-8"), MONTH_CLOSE_PASSWORD.encode("utf-8")):
+        _CLOSE_FAILS.append(now)
         raise HTTPException(status_code=403, detail="Неверный пароль закрытия месяца")
+    if req.region not in _VALID_REGIONS + ("Оба",):
+        raise HTTPException(status_code=400, detail="Неизвестный регион")
+    if not _MONTH_RE.match(str(req.month)):
+        raise HTTPException(status_code=400, detail="Неверный формат месяца (ожидается YYYY-MM)")
+    if req.month > date.today().strftime("%Y-%m"):
+        raise HTTPException(status_code=400, detail="Нельзя закрыть будущий месяц")
 
     if req.region == "Оба":
         results = [_close_single_month(req.month, "Город"), _close_single_month(req.month, "Район")]
@@ -2348,14 +2517,14 @@ def get_fact_report(report_date: str, region: str = "Город"):
             for p in points_list:
                 pid = p["id"]
                 child_cnt = p["default_children"]
-                qty = math.ceil(child_cnt * kg_per_child) if unit == "шт" else round(child_cnt * kg_per_child, 2)
+                qty = _ceil_pieces(child_cnt * kg_per_child) if unit == "шт" else round(child_cnt * kg_per_child, 2)
                 points_qty[pid] = qty
                 row_sum += qty
 
             fact_consumption[prod_name] = {
                 "unit": unit,
                 "points_qty": points_qty,
-                "total_fact": math.ceil(row_sum) if unit == "шт" else round(row_sum, 2)
+                "total_fact": _ceil_pieces(row_sum) if unit == "шт" else round(row_sum, 2)
             }
     return {
         "date": report_date,
@@ -2444,14 +2613,14 @@ def get_fact_staff_report(report_date: str, region: str = "Город"):
             for p in points_list:
                 pid = p["id"]
                 staff_cnt = p["default_staff"]
-                qty = math.ceil(staff_cnt * kg_per_staff) if unit == "шт" else round(staff_cnt * kg_per_staff, 2)
+                qty = _ceil_pieces(staff_cnt * kg_per_staff) if unit == "шт" else round(staff_cnt * kg_per_staff, 2)
                 points_qty[pid] = qty
                 row_sum += qty
 
             fact_consumption[prod_name] = {
                 "unit": unit,
                 "points_qty": points_qty,
-                "total_fact": math.ceil(row_sum) if unit == "шт" else round(row_sum, 2)
+                "total_fact": _ceil_pieces(row_sum) if unit == "шт" else round(row_sum, 2)
             }
     return {
         "date": report_date,
@@ -2583,7 +2752,7 @@ def get_balance_report(report_date: str, region: str = "Город"):
                             for prod_name, pdata in day_menu.items():
                                 unit_check = pdata.get("unit", "кг")
                                 raw_consumption = pdata.get("qty_per_child", 0.0) * child_cnt
-                                day_qty = math.ceil(raw_consumption) if unit_check == "шт" else raw_consumption
+                                day_qty = _ceil_pieces(raw_consumption) if unit_check == "шт" else raw_consumption
                                 consumed_between[pid][prod_name] = consumed_between[pid].get(prod_name, 0.0) + day_qty
 
                         day_staff_menu = load_staff_menu_from_excel(m_num)
@@ -2597,7 +2766,7 @@ def get_balance_report(report_date: str, region: str = "Город"):
                                 for prod_name, pdata in day_staff_menu.items():
                                     unit_check = pdata.get("unit", "кг")
                                     raw_consumption = pdata.get("qty_per_staff", 0.0) * staff_cnt
-                                    day_qty = math.ceil(raw_consumption) if unit_check == "шт" else raw_consumption
+                                    day_qty = _ceil_pieces(raw_consumption) if unit_check == "шт" else raw_consumption
                                     consumed_between[pid][prod_name] = consumed_between[pid].get(prod_name, 0.0) + day_qty
 
                 curr_d += timedelta(days=1)
@@ -2615,6 +2784,7 @@ def get_balance_report(report_date: str, region: str = "Город"):
         if isinstance(p_cons, dict):
             legacy_products.update(p_cons.keys())
     legacy_products -= set(current_products.keys())
+    legacy_products = {p for p in legacy_products if _is_safe_product_name(p)}
     legacy_units = get_closed_units_map(region) if legacy_products else {}
 
     all_products_set = set(current_products.keys()) | legacy_products
@@ -2632,7 +2802,7 @@ def get_balance_report(report_date: str, region: str = "Город"):
 
         for pid in points_dict.keys():
             p_init = initial_stock.get(str(pid), {}) if str(pid) in initial_stock else initial_stock.get(pid, {})
-            init_val = p_init.get(prod_name, 0.0) if isinstance(p_init, dict) else float(p_init or 0.0)
+            init_val = _safe_float_or_zero(p_init.get(prod_name, 0.0) if isinstance(p_init, dict) else p_init)
 
             p_purch = purchases_between.get(pid, {})
             purch_val = p_purch.get(prod_name, 0.0) if isinstance(p_purch, dict) else float(p_purch or 0.0)
@@ -2641,7 +2811,7 @@ def get_balance_report(report_date: str, region: str = "Город"):
             cons_val = p_cons.get(prod_name, 0.0) if isinstance(p_cons, dict) else float(p_cons or 0.0)
 
             bal = (init_val + purch_val) - cons_val
-            bal_rounded = float(math.ceil(bal)) if unit == "шт" else round(bal, 2)
+            bal_rounded = float(_ceil_pieces(bal)) if unit == "шт" else round(bal, 2)
 
             points_balance[pid] = bal_rounded
             prod_total_balance += bal_rounded
@@ -2653,7 +2823,7 @@ def get_balance_report(report_date: str, region: str = "Город"):
         balance_report[prod_name] = {
             "unit": unit,
             "points_balance": points_balance,
-            "total_balance": float(math.ceil(prod_total_balance)) if unit == "шт" else round(prod_total_balance, 2)
+            "total_balance": float(_ceil_pieces(prod_total_balance)) if unit == "шт" else round(prod_total_balance, 2)
         }
 
     return {
@@ -2740,6 +2910,8 @@ def export_balance_excel(report_date: str, region: str = "Город"):
 
 @app.post("/api/fact/children")
 def save_fact_children_api(data: dict, report_date: str, region: str = "Город"):
+    region = _check_region(region)
+    report_date = _check_iso_date(report_date)
     assert_month_open(report_date, region)
     save_fact_children_for_date(report_date, region, data)
     return {"status": "success"}
@@ -2747,6 +2919,8 @@ def save_fact_children_api(data: dict, report_date: str, region: str = "Горо
 
 @app.delete("/api/fact/children")
 def delete_fact_children_api(report_date: str, region: str = "Город"):
+    region = _check_region(region)
+    report_date = _check_iso_date(report_date)
     assert_month_open(report_date, region)
     delete_fact_children_for_date(report_date, region)
     return {"status": "success"}
@@ -2754,6 +2928,8 @@ def delete_fact_children_api(report_date: str, region: str = "Город"):
 
 @app.post("/api/fact-staff/staff")
 def save_fact_staff_api(data: dict, report_date: str, region: str = "Город"):
+    region = _check_region(region)
+    report_date = _check_iso_date(report_date)
     assert_month_open(report_date, region)
     save_fact_staff_for_date(report_date, region, data)
     return {"status": "success"}
@@ -2761,6 +2937,8 @@ def save_fact_staff_api(data: dict, report_date: str, region: str = "Город"
 
 @app.delete("/api/fact-staff/staff")
 def delete_fact_staff_api(report_date: str, region: str = "Город"):
+    region = _check_region(region)
+    report_date = _check_iso_date(report_date)
     assert_month_open(report_date, region)
     delete_fact_staff_for_date(report_date, region)
     return {"status": "success"}
@@ -3012,7 +3190,7 @@ def export_monthly_mtt_consumption_excel(month: str, region: str = "Город")
                             kg_per_child = pdata.get("qty_per_child", 0.0)
                             unit = pdata.get("unit", "кг")
                             raw_val = kg_per_child * child_cnt
-                            qty = float(math.ceil(raw_val)) if unit == "шт" else round(raw_val, 2)
+                            qty = float(_ceil_pieces(raw_val)) if unit == "шт" else round(raw_val, 2)
                             if qty > 0:
                                 rows_data.append({
                                     "Дата": d_str,
@@ -3098,7 +3276,7 @@ def export_staff_monthly_mtt_consumption_excel(month: str, region: str = "Гор
                             kg_per_staff = pdata.get("qty_per_staff", 0.0)
                             unit = pdata.get("unit", "кг")
                             raw_val = kg_per_staff * staff_cnt
-                            qty = float(math.ceil(raw_val)) if unit == "шт" else round(raw_val, 2)
+                            qty = float(_ceil_pieces(raw_val)) if unit == "шт" else round(raw_val, 2)
                             if qty > 0:
                                 rows_data.append({
                                     "Дата": d_str,
@@ -3138,6 +3316,7 @@ def generate_and_send_menu_api(report_date: str, background_tasks: BackgroundTas
         parsed_date = date.fromisoformat(report_date)
     except Exception:
         raise HTTPException(status_code=400, detail="Неверная дата")
+    region = _check_region(region)
 
     fact_storage = load_fact_children_settings()
     saved_fact = fact_storage.get(report_date, {}).get(region, {})
@@ -3165,6 +3344,7 @@ def generate_and_send_staff_menu_api(report_date: str, background_tasks: Backgro
         parsed_date = date.fromisoformat(report_date)
     except Exception:
         raise HTTPException(status_code=400, detail="Неверная дата")
+    region = _check_region(region)
 
     fact_storage = load_fact_staff_settings()
     saved_fact = fact_storage.get(report_date, {}).get(region, {})
@@ -3195,6 +3375,15 @@ def _resolve_stock_date(inv_date: str | None = None, target_date: str | None = N
     return date.today().isoformat()
 
 
+def _validated_stock_date(inv_date: str | None = None, target_date: str | None = None) -> str:
+    """Дата акта для записи/удаления: только корректная дата, в виде YYYY-MM-DD."""
+    raw = _resolve_stock_date(inv_date, target_date)
+    try:
+        return date.fromisoformat(raw).isoformat()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Неверный формат даты акта (ожидается YYYY-MM-DD)")
+
+
 @app.get("/api/stock/matrix/{region}")
 def get_stock_matrix_api(region: str, inv_date: str = None, target_date: str = None):
     points_dict = load_points_from_excel(region)
@@ -3211,13 +3400,15 @@ def get_stock_matrix_api(region: str, inv_date: str = None, target_date: str = N
         if not isinstance(p_data, dict):
             continue
         for prod, val in p_data.items():
-            if prod in all_products:
+            if prod in all_products or not _is_safe_product_name(prod):
+                continue
+            if val in (None, ""):
                 continue
             try:
-                if float(val or 0) != 0:
+                if float(str(val).replace(",", ".").strip()) != 0:
                     legacy_names.add(prod)
             except (TypeError, ValueError):
-                continue
+                legacy_names.add(prod)  # непонятное значение лучше показать, чем молча потерять
     if legacy_names:
         legacy_units = get_closed_units_map(region)
         for prod in legacy_names:
@@ -3240,7 +3431,8 @@ def get_stock_matrix_api(region: str, inv_date: str = None, target_date: str = N
 
 @app.post("/api/stock/matrix/{region}")
 def save_stock_matrix_api(region: str, data: dict, inv_date: str = None, target_date: str = None):
-    resolved_date = _resolve_stock_date(inv_date, target_date)
+    region = _check_region(region)
+    resolved_date = _validated_stock_date(inv_date, target_date)
     assert_month_open(resolved_date, region)
     save_stock_settings_for_date(resolved_date, region, data)
     return {"status": "success"}
@@ -3248,7 +3440,8 @@ def save_stock_matrix_api(region: str, data: dict, inv_date: str = None, target_
 
 @app.delete("/api/stock/matrix/{region}")
 def delete_stock_matrix_api(region: str, inv_date: str = None, target_date: str = None):
-    resolved_date = _resolve_stock_date(inv_date, target_date)
+    region = _check_region(region)
+    resolved_date = _validated_stock_date(inv_date, target_date)
     assert_month_open(resolved_date, region)
     delete_stock_settings_for_date(resolved_date, region)
     return {"status": "success"}
@@ -3274,7 +3467,7 @@ def export_stock_excel(region: str = "Город", inv_date: str = None, target_
             val = float(p_info["points_stock"].get(p["id"], 0.0) or 0.0)
             row[p["name"]] = val
             total_val += val
-        row["ИТОГО ОСТАТОК"] = float(math.ceil(total_val)) if p_info["unit"] == "шт" else round(total_val, 2)
+        row["ИТОГО ОСТАТОК"] = float(_ceil_pieces(total_val)) if p_info["unit"] == "шт" else round(total_val, 2)
         rows_data.append(row)
 
     df = pd.DataFrame(rows_data)
@@ -3305,6 +3498,8 @@ def get_calendar_range_api(start: str, end: str):
         e_date = date.fromisoformat(end)
     except ValueError:
         raise HTTPException(status_code=400, detail="Неверный формат дат")
+    if (e_date - s_date).days > 800:
+        raise HTTPException(status_code=400, detail="Слишком большой период (не более 800 дней)")
     cal_map = calculate_calendar_dynamic(s_date, e_date)
     for d_str, info in cal_map.items():
         info["is_closed"] = is_month_closed(d_str, "Город") or is_month_closed(d_str, "Район")
@@ -3316,12 +3511,26 @@ def save_setting_api(data: dict):
     date_str = data.get("date")
     if not date_str:
         raise HTTPException(status_code=400, detail="Дата обязательна")
+    date_str = _check_iso_date(date_str)
+    menu_val = data.get("menu")
+    if menu_val in (None, ""):
+        menu_val = None
+    else:
+        try:
+            menu_val = int(menu_val)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Номер меню должен быть числом от 1 до 10")
+        if not 1 <= menu_val <= 10:
+            raise HTTPException(status_code=400, detail="Номер меню должен быть числом от 1 до 10")
+    holiday_val = data.get("is_holiday", False)
+    if not isinstance(holiday_val, bool):
+        raise HTTPException(status_code=400, detail="is_holiday должен быть true или false")
     if is_month_closed(date_str, "Город") or is_month_closed(date_str, "Район"):
         raise HTTPException(status_code=423, detail=f"Дата {date_str} входит в закрытый месяц. Изменение календаря запрещено.")
     settings = load_manual_settings()
     settings["days"][date_str] = {
-        "is_holiday": data.get("is_holiday", False),
-        "menu": data.get("menu")
+        "is_holiday": holiday_val,
+        "menu": menu_val
     }
     save_manual_settings(settings)
     return {"status": "success"}
@@ -3414,7 +3623,7 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город", days_co
                             for prod_name, pdata in day_menu.items():
                                 unit_check = pdata.get("unit", "кг")
                                 raw_cons = pdata.get("qty_per_child", 0.0) * children
-                                cons_val = math.ceil(raw_cons) if unit_check == "шт" else raw_cons
+                                cons_val = _ceil_pieces(raw_cons) if unit_check == "шт" else raw_cons
                                 consumed_between[pid][prod_name] = consumed_between[pid].get(prod_name, 0.0) + cons_val
 
                         day_staff_menu = load_staff_menu_from_excel(menu_num)
@@ -3428,7 +3637,7 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город", days_co
                                 for prod_name, pdata in day_staff_menu.items():
                                     unit_check = pdata.get("unit", "кг")
                                     raw_cons = pdata.get("qty_per_staff", 0.0) * staff_cnt
-                                    cons_val = math.ceil(raw_cons) if unit_check == "шт" else raw_cons
+                                    cons_val = _ceil_pieces(raw_cons) if unit_check == "шт" else raw_cons
                                     consumed_between[pid][prod_name] = consumed_between[pid].get(prod_name, 0.0) + cons_val
 
                 curr_d += timedelta(days=1)
@@ -3479,7 +3688,7 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город", days_co
             for prod_name, data in ttk_items.items():
                 kg_per_child = data.get("qty_per_child", 0.0)
                 unit = data["unit"]
-                gross_needed = math.ceil(kg_per_child * children) if unit == "шт" else kg_per_child * children
+                gross_needed = _ceil_pieces(kg_per_child * children) if unit == "шт" else kg_per_child * children
 
                 if prod_name not in matrix_data:
                     matrix_data[prod_name] = {
@@ -3507,7 +3716,7 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город", days_co
                         running_stock[point_id][st_key_matched] = 0.0
 
                 if unit == "шт":
-                    matrix_data[prod_name]["points_qty"][point_id] += float(math.ceil(net_needed))
+                    matrix_data[prod_name]["points_qty"][point_id] += float(_ceil_pieces(net_needed))
                 else:
                     matrix_data[prod_name]["points_qty"][point_id] += round(net_needed, 2)
 
@@ -3528,7 +3737,7 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город", days_co
                 for prod_name, data in staff_ttk_items.items():
                     kg_per_staff = data.get("qty_per_staff", 0.0)
                     unit = data["unit"]
-                    gross_needed = math.ceil(kg_per_staff * staff_cnt) if unit == "шт" else kg_per_staff * staff_cnt
+                    gross_needed = _ceil_pieces(kg_per_staff * staff_cnt) if unit == "шт" else kg_per_staff * staff_cnt
 
                     if prod_name not in matrix_data:
                         matrix_data[prod_name] = {
@@ -3556,7 +3765,7 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город", days_co
                             running_stock[point_id][st_key_matched] = 0.0
 
                     if unit == "шт":
-                        matrix_data[prod_name]["points_qty"][point_id] += float(math.ceil(net_needed))
+                        matrix_data[prod_name]["points_qty"][point_id] += float(_ceil_pieces(net_needed))
                     else:
                         matrix_data[prod_name]["points_qty"][point_id] += round(net_needed, 2)
 
@@ -3565,11 +3774,11 @@ def get_matrix_raznaryadka(target_date: str, region: str = "Город", days_co
         row_sum = 0.0
         for pid in points_dict.keys():
             val = prod_info["points_qty"][pid]
-            val = float(math.ceil(val)) if unit == "шт" else round(val, 2)
+            val = float(_ceil_pieces(val)) if unit == "шт" else round(val, 2)
             prod_info["points_qty"][pid] = val
             row_sum += val
 
-        prod_info["weekly_total"] = float(math.ceil(row_sum)) if unit == "шт" else round(row_sum, 2)
+        prod_info["weekly_total"] = float(_ceil_pieces(row_sum)) if unit == "шт" else round(row_sum, 2)
 
     if filter_period and filter_period != "ALL":
         periodicities = load_all_nomenclature_periodicities()
